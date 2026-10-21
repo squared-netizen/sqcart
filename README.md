@@ -1,6 +1,7 @@
 # sqcart
 
 My Vision for sqcart 
+
 Squared .sq cartridges will act as high-capacity, high-performance data containers that can support both enormous datasets and executable extensions.
 
 
