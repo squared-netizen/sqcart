@@ -1,5 +1,9 @@
 # sqcart
 
+My Vision for sqcart 
+Squared .sq cartridges will act as high-capacity, high-performance data containers that can support both enormous datasets and executable extensions.
+
+
 Reference implementation of the [Squared Cartridge Specification
 2.0](docs/developer/specs/sq-cartridge-2.0.md) — the `.sq` container format
 used for Squared templates, kits, packages, asset bundles, plugins and
