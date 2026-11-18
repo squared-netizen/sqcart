@@ -257,6 +257,36 @@ int main() {
         check(!c && c.error().code == Code::path, "README and readme collide: refused");
     }
 
+    // The lock without flock (§10.2): the owner file.
+    {
+        auto p = scratch("owner.sq");
+        auto o = quick_options();
+        o.lock = LockMode::owner_file;
+        auto owner = p;
+        owner += ".lock.owner";
+        {
+            auto w = Writer::create(p, o);
+            check(w.has_value(), "create under an owner file");
+            check(std::filesystem::exists(owner), "the owner file names its holder");
+            check(!Writer::open(p, o), "a second writer is refused while it is held");
+            w->put("SQ-INF/manifest.json", manifest());
+            check(w->commit().has_value(), "commit under an owner file");
+        }
+        check(!std::filesystem::exists(owner), "released: the owner file is gone");
+        std::string here;
+        { std::ifstream("/proc/sys/kernel/hostname") >> here; }  // gethostname's, on Linux and Android
+        // A holder gone from this host: taken over. (Process 2^22 + 7 is not running.)
+        { std::ofstream(owner) << std::format("{} {} 0\n", here, 4194311); }
+        auto taken = Writer::open(p, o);
+        check(taken.has_value(), taken ? "a dead holder's lock is taken over" : taken.error().message);
+        taken = std::unexpected(Error{});
+        // A holder on another host: never taken.
+        { std::ofstream(owner) << "some-other-host 1 0\n"; }
+        auto refused = Writer::open(p, o);
+        check(!refused, "a lock held on another host is never taken");
+        std::filesystem::remove(owner);
+    }
+
     // Durable commits (sync on), for the flush calls themselves.
     {
         auto p = scratch("sync.sq");

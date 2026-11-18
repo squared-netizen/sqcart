@@ -101,9 +101,6 @@ that a reader can see.
 
 ## Not yet
 
-- **The lock without flock.** §10.2's fallback for file systems with no
-  flock (a lock file naming its holder's host, process and start time) is
-  not written: on such a file system the writer refuses.
 - **Dictionaries.** The reader reads codec 2; the writer does not train or
   use dictionaries yet.
 - **Paths from a Mac.** `pack` takes a folder's names as the file system

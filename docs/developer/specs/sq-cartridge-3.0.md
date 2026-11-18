@@ -856,10 +856,14 @@ commit.
 
 Where the system offers `flock` or `fcntl` locks on the lock file, the
 writer uses them, and the lock dies with the process. Where it does not
-(some FUSE and network file systems), the lock file holds the writer's
-host name, process ID and process start time; a writer MAY take over a
-lock only when that process is gone from that host, and MUST otherwise
-refuse.
+(some FUSE and network file systems), the writer instead creates
+`<file>.lock.owner` exclusively (`O_CREAT | O_EXCL`, atomic where `flock`
+is not), writes the writer's host name, process ID and process start
+time into it, and deletes it when it is done. A writer MAY take over an
+owner file only when its process is gone from that host (it checks the
+start time too, so a later process given the same ID is not taken for
+it), and MUST otherwise refuse: an owner file from another host is never
+taken over.
 
 Readers need no lock: they see the commit a superblock named when they
 opened the file, and a commit appended later does not disturb them,

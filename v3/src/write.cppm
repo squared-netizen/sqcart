@@ -23,6 +23,7 @@ module;
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -69,43 +70,147 @@ bool compressed_already(const std::optional<std::string>& media_type) {
     return std::ranges::any_of(kinds, [&](std::string_view k) { return media_type->starts_with(k); });
 }
 
-/// The lock of §10.2: an exclusive flock on <file>.lock, never on the
-/// cartridge (compaction renames a new file over it). Released with the
-/// object, or with the process.
+/// This process's identity for a lock (§10.2): its host, its process ID,
+/// and when that process started (so a later process given the same ID is
+/// not taken for it).
+struct Holder {
+    std::string host;
+    long pid = 0;
+    std::uint64_t started = 0;
+
+    static std::uint64_t start_time(long pid) {
+#if defined(__linux__)
+        // /proc/<pid>/stat: field 22, after the command name in parentheses.
+        std::ifstream in(std::format("/proc/{}/stat", pid));
+        std::string line;
+        if (!std::getline(in, line)) return 0;
+        const auto close = line.rfind(')');
+        if (close == std::string::npos) return 0;
+        std::istringstream rest(line.substr(close + 2));
+        std::string field;
+        for (int i = 3; i <= 22 && rest >> field; ++i) {
+            if (i == 22) return std::strtoull(field.c_str(), nullptr, 10);
+        }
+#endif
+        static_cast<void>(pid);
+        return 0;
+    }
+
+    static Holder self() {
+        std::array<char, 256> host{};
+        ::gethostname(host.data(), host.size() - 1);
+        const long pid = static_cast<long>(::getpid());
+        return {host.data(), pid, start_time(pid)};
+    }
+
+    [[nodiscard]] std::string text() const { return std::format("{} {} {}\n", host, pid, started); }
+
+    static std::optional<Holder> parse(std::string_view text) {
+        Holder h;
+        std::istringstream in{std::string(text)};
+        if (!(in >> h.host >> h.pid >> h.started)) return std::nullopt;
+        return h;
+    }
+
+    /// Whether this holder is a process still running on this host.
+    [[nodiscard]] bool alive_here() const {
+        if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM) return false;
+        const std::uint64_t now = start_time(pid);
+        return now == 0 || started == 0 || now == started;
+    }
+};
+
+}  // namespace sq::cart
+
+export namespace sq::cart {
+
+/// How a writer locks (§10.2).
+enum class LockMode : std::uint8_t {
+    automatic,   ///< flock on <file>.lock; where the file system has none, the owner file
+    owner_file,  ///< <file>.lock.owner, created exclusively, naming its holder
+};
+
+}  // namespace sq::cart
+
+namespace sq::cart {
+
+/// The lock of §10.2, never on the cartridge (compaction renames a new file
+/// over it): an exclusive flock on <file>.lock, which dies with the
+/// process; or, on a file system without flock (some FUSE and network
+/// ones), <file>.lock.owner, created exclusively (atomic where flock is
+/// not), holding the writer's host, process and start time, and removed
+/// when it is released. An owner file left by a process gone from this
+/// host is taken over; one from another host never is.
 class Lock {
 public:
-    static Result<Lock> take(const std::filesystem::path& cartridge) {
+    static Result<Lock> take(const std::filesystem::path& cartridge, LockMode mode = LockMode::automatic) {
         auto path = cartridge;
         path += ".lock";
-        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-        if (fd < 0) return fail(Code::io, errno_text("cannot open the lock", path));
-        if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (mode == LockMode::automatic) {
+            const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+            if (fd < 0) return fail(Code::io, errno_text("cannot open the lock", path));
+            if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return Lock(fd, {});
             const int why = errno;
             ::close(fd);
-            if (why == EWOULDBLOCK) return fail(Code::io, std::format("{} is being written by another process ({} is locked)", cartridge.string(), path.string()));
-            // A file system without flock (some FUSE and network ones): §10.2
-            // would fall back to a lock file naming its holder; not yet.
-            return fail(Code::io, std::format("cannot lock {}: {} (a file system without flock?)", path.string(), std::strerror(why)));
+            if (why == EWOULDBLOCK) {
+                return fail(Code::io, std::format("{} is being written by another process ({} is locked)", cartridge.string(), path.string()));
+            }
+            if (why != EINVAL && why != ENOSYS && why != EOPNOTSUPP && why != ENOLCK) {
+                return fail(Code::io, std::format("cannot lock {}: {}", path.string(), std::strerror(why)));
+            }
         }
-        return Lock(fd);
+        auto owner = path;
+        owner += ".owner";
+        const Holder me = Holder::self();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const int fd = ::open(owner.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+            if (fd >= 0) {
+                const std::string t = me.text();
+                const bool written = ::write(fd, t.data(), t.size()) == static_cast<ssize_t>(t.size()) && ::fsync(fd) == 0;
+                ::close(fd);
+                if (!written) {
+                    ::unlink(owner.c_str());
+                    return fail(Code::io, errno_text("cannot write the lock", owner));
+                }
+                return Lock(-1, owner);
+            }
+            if (errno != EEXIST) return fail(Code::io, errno_text("cannot create the lock", owner));
+            std::ifstream in(owner);
+            const std::string held{std::istreambuf_iterator<char>(in), {}};
+            const auto holder = Holder::parse(held);
+            if (holder && holder->host != me.host) {
+                return fail(Code::io, std::format("{} is held by a process on {} ({}): only that host can say it is gone", cartridge.string(),
+                                                  holder->host, owner.string()));
+            }
+            if (holder && holder->alive_here()) {
+                return fail(Code::io, std::format("{} is being written by process {} ({})", cartridge.string(), holder->pid, owner.string()));
+            }
+            // A holder gone from this host (or a lock never finished): take it over, once.
+            if (attempt == 0) ::unlink(owner.c_str());
+        }
+        return fail(Code::io, std::format("cannot take the lock {}", owner.string()));
     }
-    Lock(Lock&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+    Lock(Lock&& other) noexcept : fd_(std::exchange(other.fd_, -1)), owner_(std::exchange(other.owner_, {})) {}
     Lock& operator=(Lock&& other) noexcept {
         if (this != &other) {
             release();
             fd_ = std::exchange(other.fd_, -1);
+            owner_ = std::exchange(other.owner_, {});
         }
         return *this;
     }
     ~Lock() { release(); }
 
 private:
-    explicit Lock(int fd) : fd_(fd) {}
+    Lock(int fd, std::filesystem::path owner) : fd_(fd), owner_(std::move(owner)) {}
     void release() noexcept {
         if (fd_ >= 0) ::close(fd_);  // closing drops the flock
         fd_ = -1;
+        if (!owner_.empty()) ::unlink(owner_.c_str());
+        owner_.clear();
     }
     int fd_ = -1;
+    std::filesystem::path owner_;
 };
 
 /// A file being appended to: pwrite at the end, flushes that reach storage.
@@ -243,6 +348,7 @@ struct WriteOptions {
     bool sync = true;
     /// The commit time; else SOURCE_DATE_EPOCH (in seconds) when set, else now (§3.10).
     std::optional<std::int64_t> commit_time;
+    LockMode lock = LockMode::automatic;
 };
 
 /// How an entry is stored (§4.3).
@@ -281,7 +387,7 @@ class Writer {
 public:
     /// A new cartridge; refuses a file that is there already.
     [[nodiscard]] static Result<Writer> create(const std::filesystem::path& path, WriteOptions options = {}) {
-        auto lock = Lock::take(path);
+        auto lock = Lock::take(path, options.lock);
         if (!lock) return std::unexpected(lock.error());
         auto file = Appender::open(path, true);
         if (!file) return std::unexpected(file.error());
@@ -300,7 +406,7 @@ public:
 
     /// An existing cartridge: its lock taken, trailing bytes truncated (§10.3).
     [[nodiscard]] static Result<Writer> open(const std::filesystem::path& path, WriteOptions options = {}) {
-        auto lock = Lock::take(path);
+        auto lock = Lock::take(path, options.lock);
         if (!lock) return std::unexpected(lock.error());
         auto archive = Archive::open(path, ReadOptions{options.limits});
         if (!archive) return std::unexpected(archive.error());
@@ -997,7 +1103,7 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
 }
 
 Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
-    auto lock = Lock::take(path);
+    auto lock = Lock::take(path, options.lock);
     if (!lock) return std::unexpected(lock.error());
     auto old = Archive::open(path, ReadOptions{options.limits});
     if (!old) return std::unexpected(old.error());
