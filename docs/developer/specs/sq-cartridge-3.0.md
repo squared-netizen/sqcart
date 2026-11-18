@@ -153,8 +153,11 @@ A reader:
    correct, whose sequence number is not zero, and whose commit record
    lies inside the file;
 3. takes the slot with the higher sequence number, and reads and checks
-   that commit record (§3.4); if it is not valid, it falls back to the
-   other slot;
+   that commit record (§3.4); if it is damaged (its magic, checksum or
+   bounds fail), it falls back to the other slot. A commit that is intact
+   but that the reader cannot or may not read (a required feature it
+   lacks, a limit of §3.8) is refused as it is, never passed over: the
+   older commit is a state the cartridge has replaced;
 4. refuses the cartridge when neither slot names a valid commit.
 
 The slot the reader settles on is the **current slot**; the other is
@@ -729,10 +732,22 @@ at that commit: the SHA-256 of
    path, its 32-byte digest (§9.1), and its metadata, each as a u32
    length followed by its bytes.
 
-`<metadata>` is the JSON object of the entry's title, author, media
-type, created, updated, flags (as letters, in the order `rwx`) and
-attributes, with members in that order, absent ones left out, in the
-canonical form of RFC 8785 (JSON Canonicalization Scheme). The
+`<metadata>` is a JSON object of the entry's metadata in the canonical
+form of RFC 8785 (JSON Canonicalization Scheme), which orders members by
+name:
+
+| Member | Value | Present |
+|---|---|---|
+| `attributes` | the attributes object | when the entry has one |
+| `author` | string | when the entry has one |
+| `created` | number (ms) | always |
+| `flags` | the `r`, `w` and `x` flags as letters, in that order (`"rw"`; `""` for none) | always |
+| `media_type` | string | when the entry has one |
+| `title` | string | when the entry has one |
+| `updated` | number (ms) | always |
+
+JCS writes every number as a double, so `created` and `updated` MUST lie
+within ±(2^53 − 1); a validator reports one that does not. The
 attributes object is canonicalised too: a writer MUST store attributes
 in canonical form, and a validator MUST report attributes that are not,
 so that every implementation, and every round trip through
