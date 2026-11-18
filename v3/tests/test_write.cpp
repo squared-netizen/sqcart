@@ -257,6 +257,45 @@ int main() {
         check(!c && c.error().code == Code::path, "README and readme collide: refused");
     }
 
+    // Dictionaries (§4.3): trained on records, used for them, read again later.
+    {
+        auto p = scratch("dict.sq");
+        std::vector<std::vector<std::byte>> records;
+        for (int i = 0; i < 300; ++i) {
+            records.push_back(bytes(std::format(R"({{"id":{},"name":"Settlement {}","population":{},"founded":{},"region":"{}"}})", i, i,
+                                                1000 + i * 37 % 9000, 1200 + i % 700, i % 3 == 0 ? "north" : "south")));
+        }
+        std::vector<std::span<const std::byte>> samples(records.begin(), records.end());
+        std::uint32_t id = 0;
+        {
+            auto w = Writer::create(p, quick_options());
+            w->put("SQ-INF/manifest.json", manifest());
+            auto trained = w->train_dictionary(samples, 4096);
+            check(trained.has_value(), trained ? "train a dictionary" : trained.error().message);
+            id = trained.value_or(0);
+            check(id >= 32768, "its ID is outside zstd's registered range");
+            for (std::size_t i = 0; i < 200; ++i) {
+                w->put(std::format("world/settlements/{}.json", i), records[i], {.media_type = "application/json", .dictionary = id});
+            }
+            auto c = w->commit();
+            check(c && (c->features & feature::zstd_dictionaries), c ? "a commit using it declares zstd-dictionaries" : c.error().message);
+        }
+        {
+            auto w = Writer::open(p, quick_options());
+            w->put("world/settlements/250.json", records[250], {.dictionary = id});
+            check(w->commit().has_value(), "a later commit uses the dictionary from the cartridge");
+        }
+        auto a = Archive::open(p);
+        const auto e = a->find("world/settlements/7.json");
+        check(e && e->codec == Codec::zstd_dict && e->dictionary == id && e->stored_size < e->size, "a record compressed with it");
+        check(e && a->read(*e).value() == records[7], "and read back");
+        const auto later = a->find("world/settlements/250.json");
+        check(later && later->codec == Codec::zstd_dict && a->read(*later).value() == records[250], "the later one too");
+        check(checks(p), "check finds nothing (no unused dictionary)");
+        check(compact(p, quick_options()).has_value() && Archive::open(p)->find(std::format("SQ-INF/dictionaries/{}.zdict", id)),
+              "compaction keeps a dictionary in use");
+    }
+
     // The lock without flock (§10.2): the owner file.
     {
         auto p = scratch("owner.sq");

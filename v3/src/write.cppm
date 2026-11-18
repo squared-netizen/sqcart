@@ -19,6 +19,8 @@ module;
 
 #define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
+#define ZDICT_STATIC_LINKING_ONLY
+#include <zdict.h>
 
 #include <cerrno>
 #include <cstring>
@@ -314,6 +316,26 @@ Result<void> flush_folder(const std::filesystem::path& file) {
     return {};
 }
 
+/// A zstd frame of `content` compressed with `dictionary` (its ID in the
+/// frame header, §4.3).
+Result<std::vector<std::byte>> zstd_dict_frame(std::span<const std::byte> content, std::span<const std::byte> dictionary, int level) {
+    std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> ctx(ZSTD_createCCtx(), ZSTD_freeCCtx);
+    if (!ctx) return fail(Code::io, "out of memory for a zstd compressor");
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_compressionLevel, level);
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_contentSizeFlag, 1);
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_checksumFlag, 0);
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_dictIDFlag, 1);
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_nbWorkers, 0);
+    if (const std::size_t r = ZSTD_CCtx_loadDictionary(ctx.get(), dictionary.data(), dictionary.size()); ZSTD_isError(r)) {
+        return fail(Code::malformed, std::format("an unusable zstd dictionary: {}", ZSTD_getErrorName(r)));
+    }
+    std::vector<std::byte> out(ZSTD_compressBound(content.size()));
+    const std::size_t n = ZSTD_compress2(ctx.get(), out.data(), out.size(), content.data(), content.size());
+    if (ZSTD_isError(n)) return fail(Code::io, std::format("zstd: {}", ZSTD_getErrorName(n)));
+    out.resize(n);
+    return out;
+}
+
 /// A zstd frame of `content`, with its content size and checksum-free, at
 /// `level`, its window within 2^window_log, single-threaded (§3.10: the
 /// same bytes every time).
@@ -365,6 +387,9 @@ struct PutOptions {
     std::int64_t created = 0, updated = 0;
     std::uint16_t flags = flag::r;
     Store store = Store::automatic;
+    /// Compress with this dictionary (codec 2, §4.3): one trained with
+    /// train_dictionary, or already in the cartridge. 0: none.
+    std::uint32_t dictionary = 0;
 };
 
 /// A key to sign commits with (§9.3).
@@ -472,6 +497,51 @@ public:
         return {};
     }
 
+    /// Train a zstd dictionary on `samples` (many small, similar entries:
+    /// JSON records, a manual's pages) and stage it as
+    /// SQ-INF/dictionaries/<id>.zdict (§4.3). Its ID is derived from the
+    /// samples, at least 32768 (below is zstd's registered range), so the
+    /// same samples give the same ID. Pass the ID in PutOptions::dictionary.
+    Result<std::uint32_t> train_dictionary(std::span<const std::span<const std::byte>> samples, std::size_t max_size = 16 * 1024) {
+        std::vector<std::byte> joined;
+        std::vector<std::size_t> sizes;
+        Sha256 h;
+        for (const auto& sample : samples) {
+            joined.insert(joined.end(), sample.begin(), sample.end());
+            sizes.push_back(sample.size());
+            h.update(sample);
+            std::array<std::byte, 8> n{};
+            for (std::size_t i = 0; i < 8; ++i) n[i] = static_cast<std::byte>(std::uint64_t{sample.size()} >> (8 * i));
+            h.update(n);
+        }
+        if (samples.size() < 8) return fail(Code::malformed, "too few samples to train a dictionary on (8 at least; hundreds is better)");
+        const Digest d = h.finish();
+        std::uint32_t id = 0;
+        for (std::size_t i = 0; i < 4; ++i) id = id << 8 | std::to_integer<std::uint32_t>(d[i]);
+        id = 32768 + id % (0x7fffffffu - 32768);
+        while (live_.contains(std::format("SQ-INF/dictionaries/{}.zdict", id)) || dictionaries_.contains(id)) ++id;
+        ZDICT_fastCover_params_t params{};
+        params.k = 200;
+        params.d = 8;
+        params.f = 20;
+        params.steps = 4;
+        params.nbThreads = 0;
+        params.accel = 1;
+        params.zParams.compressionLevel = options_.level;
+        params.zParams.notificationLevel = 0;
+        params.zParams.dictID = id;
+        std::vector<std::byte> dictionary(max_size);
+        const std::size_t n = ZDICT_trainFromBuffer_fastCover(dictionary.data(), dictionary.size(), joined.data(), sizes.data(),
+                                                              static_cast<unsigned>(sizes.size()), params);
+        if (ZDICT_isError(n)) return fail(Code::malformed, std::format("zstd could not train a dictionary: {}", ZDICT_getErrorName(n)));
+        dictionary.resize(n);
+        if (ZDICT_getDictID(dictionary.data(), dictionary.size()) != id) return fail(Code::malformed, "zstd trained a dictionary with another ID");
+        const std::string path = std::format("SQ-INF/dictionaries/{}.zdict", id);
+        if (auto r = put(path, dictionary, {.flags = flag::dictionary, .store = Store::zstd}); !r) return std::unexpected(r.error());
+        dictionaries_.emplace(id, std::move(dictionary));
+        return id;
+    }
+
     /// Sign the commits this writer makes (§9.3).
     void sign_with(SigningKey key) { keys_.push_back(std::move(key)); }
 
@@ -501,6 +571,18 @@ private:
         has_commit_ = true;
     }
 
+    /// A dictionary by ID: trained by this writer, or read from the cartridge.
+    Result<const std::vector<std::byte>*> dictionary_bytes(std::uint32_t id) {
+        if (auto it = dictionaries_.find(id); it != dictionaries_.end()) return &it->second;
+        const std::string path = std::format("SQ-INF/dictionaries/{}.zdict", id);
+        if (!live_.contains(path)) return fail(Code::not_found, std::format("no dictionary {}", id));
+        auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
+        if (!a) return std::unexpected(a.error());
+        auto bytes = a->read(*a->find(path));
+        if (!bytes) return std::unexpected(bytes.error());
+        return &dictionaries_.emplace(id, std::move(*bytes)).first->second;
+    }
+
     Result<void> check_metadata(std::string_view path, const PutOptions& o) const {
         if ((o.flags & ~(flag::r | flag::w | flag::x | flag::mappable | flag::dictionary)) != 0) {
             return fail(Code::malformed, "flags a writer may not set", std::string(path));
@@ -523,6 +605,7 @@ private:
     std::vector<SigningKey> keys_;
     std::map<std::string, Entry, std::less<>> live_;
     std::map<std::string, Staged, std::less<>> staged_;
+    std::map<std::uint32_t, std::vector<std::byte>> dictionaries_;  // by ID, trained or read
     Commit current_{};
     bool has_commit_ = false;
 
@@ -782,13 +865,27 @@ Result<Commit> seal(Appender& file, const WriteOptions& options, std::vector<Ent
 }
 
 /// One run: stored or zstd, and its record's fields.
-Result<void> write_run(Appender& file, Entry& e, std::span<const std::byte> content, Store store, const WriteOptions& o) {
+Result<void> write_run(Appender& file, Entry& e, std::span<const std::byte> content, Store store, const WriteOptions& o,
+                       std::uint32_t dictionary_id = 0, std::span<const std::byte> dictionary = {}) {
     e.size = content.size();
     e.digest = tree_hash(content);
     e.dictionary = 0;
     if (content.empty()) {
         e.codec = Codec::stored, e.offset = 0, e.stored_size = 0;
         return {};
+    }
+    if (dictionary_id != 0 && store != Store::stored && !(e.flags & flag::mappable)) {
+        // Codec 2 when it shrinks the entry 5%, else what follows decides.
+        auto f = zstd_dict_frame(content, dictionary, o.level);
+        if (!f) return std::unexpected(f.error());
+        if (store == Store::zstd || f->size() * 100 <= content.size() * 95) {
+            if (auto r = file.pad_to(64); !r) return r;
+            e.offset = file.size();
+            e.codec = Codec::zstd_dict;
+            e.dictionary = dictionary_id;
+            e.stored_size = f->size();
+            return file.append(*f);
+        }
     }
     std::vector<std::byte> frame;
     bool use_zstd = store == Store::zstd;
@@ -942,7 +1039,13 @@ Result<Commit> Writer::commit() {
             chunks.emplace(path, std::move(list));
         } else {
             if (s.content.size() > options_.limits.max_unchunked_size) return fail(Code::limit, "past 64 MiB an entry must be chunked", path);
-            if (auto r = write_run(file_, e, s.content, o.store, options_); !r) return std::unexpected(r.error());
+            std::span<const std::byte> dictionary;
+            if (o.dictionary != 0) {
+                auto d = dictionary_bytes(o.dictionary);
+                if (!d) return std::unexpected(Error{d.error().code, d.error().message, path});
+                dictionary = **d;
+            }
+            if (auto r = write_run(file_, e, s.content, o.store, options_, o.dictionary, dictionary); !r) return std::unexpected(r.error());
         }
         records.push_back(e);
         live.insert_or_assign(path, e);

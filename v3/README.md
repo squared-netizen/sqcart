@@ -35,6 +35,9 @@ w->remove("old.txt");
 w->sign_with(sq::cart::SigningKey::from_seed(seed, "Jesse"));
 auto commit = w->commit();                       // append, flush, spare slot, flush (§10.3)
 sq::cart::compact("world.sq");                   // §10.4
+
+auto id = w->train_dictionary(samples);          // many small, similar entries (§4.3)
+w->put("world/settlements/9001.json", record, {.dictionary = *id});
 ```
 
 The writer stores what is compressed already (by media type) or would not
@@ -101,8 +104,6 @@ that a reader can see.
 
 ## Not yet
 
-- **Dictionaries.** The reader reads codec 2; the writer does not train or
-  use dictionaries yet.
 - **Paths from a Mac.** `pack` takes a folder's names as the file system
   gives them; macOS gives them decomposed (NFD), and §6.1 wants them
   converted to NFC, which needs the normalization tables this lacks (see
