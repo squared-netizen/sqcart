@@ -423,6 +423,19 @@ private:
     friend Result<void> compact(const std::filesystem::path&, WriteOptions);
 };
 
+struct PackOptions {
+    /// Leave out records in SQ-INF/entries.json for files that are not
+    /// there (left by a rename outside the tools), rather than refuse (§6.1).
+    bool drop_orphans = false;
+};
+
+/// Pack an exploded cartridge, `folder`, into a new cartridge, `out`, as one
+/// commit (§6.1): its regular files, with the metadata SQ-INF/entries.json
+/// gives them; never a symbolic link (refused, not followed), never the
+/// top-level .squared/ or .git/, never entries.json itself.
+Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::path& out, WriteOptions options = {},
+                    PackOptions pack_options = {}, std::optional<SigningKey> key = std::nullopt);
+
 /// Rewrite a cartridge as one commit with a full index, holding only its
 /// live entries (§10.4): their stored bytes copied as they are, so the
 /// content digest is unchanged and the current signatures still verify;
@@ -862,6 +875,125 @@ Result<Commit> Writer::commit() {
     adopt(*check);
     staged_.clear();
     return *c;
+}
+
+
+namespace {
+
+std::optional<std::vector<std::byte>> read_file(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::vector<char> text{std::istreambuf_iterator<char>(in), {}};
+    const auto b = std::as_bytes(std::span(text));
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
+/// One record of SQ-INF/entries.json as PutOptions.
+Result<PutOptions> exploded_options(const data::JsonValue& v, const std::string& path) {
+    PutOptions o;
+    if (v.object_if() == nullptr) return fail(Code::json, "its SQ-INF/entries.json record is not an object", path);
+    for (const auto& [name, value] : *v.object_if()) {
+        const std::string* s = value.string_if();
+        const auto number = [&]() -> std::optional<std::int64_t> {
+            if (const auto* i = value.signed_integer_if()) return *i;
+            if (const auto* u = value.unsigned_integer_if()) return static_cast<std::int64_t>(*u);
+            return std::nullopt;
+        };
+        if (name == "title" && s) {
+            o.title = *s;
+        } else if (name == "author" && s) {
+            o.author = *s;
+        } else if (name == "media_type" && s) {
+            o.media_type = *s;
+        } else if (name == "created" && number()) {
+            o.created = *number();
+        } else if (name == "updated" && number()) {
+            o.updated = *number();
+        } else if (name == "attributes" && value.object_if()) {
+            auto text = data::write_json(value, {.canonical = true});
+            if (!text) return fail(Code::json, text.error.message, path);
+            o.attributes = std::move(text.text);
+        } else if (name == "flags" && s) {
+            o.flags = 0;
+            for (const char c : *s) {
+                switch (c) {
+                    case 'r': o.flags |= flag::r; break;
+                    case 'w': o.flags |= flag::w; break;
+                    case 'x': o.flags |= flag::x; break;
+                    case 'm': o.flags |= flag::mappable; break;
+                    case 'd': o.flags |= flag::dictionary; break;
+                    default: return fail(Code::json, std::format("the flag '{}' in SQ-INF/entries.json", c), path);
+                }
+            }
+        } else {
+            return fail(Code::json, std::format("SQ-INF/entries.json: \"{}\" is not a member, or not of its type", name), path);
+        }
+    }
+    if (o.flags & flag::mappable) o.store = Store::stored;
+    return o;
+}
+
+}  // namespace
+
+Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::path& out, WriteOptions options,
+                    PackOptions pack_options, std::optional<SigningKey> key) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_regular_file(fs::symlink_status(folder / "SQ-INF" / "manifest.json", ec))) {
+        return fail(Code::malformed, folder.string() + " is not a cartridge: no SQ-INF/manifest.json");
+    }
+    // The metadata the file system cannot hold.
+    std::map<std::string, PutOptions, std::less<>> metadata;
+    if (const auto ej = folder / "SQ-INF" / "entries.json"; fs::exists(fs::symlink_status(ej, ec))) {
+        if (!fs::is_regular_file(fs::symlink_status(ej, ec))) return fail(Code::path, "SQ-INF/entries.json is not a regular file");
+        auto bytes = read_file(ej);
+        if (!bytes) return fail(Code::io, "cannot read SQ-INF/entries.json");
+        auto parsed = data::parse_json(std::string_view(reinterpret_cast<const char*>(bytes->data()), bytes->size()),
+                                       {.maximum_depth = options.limits.max_json_depth, .ijson = true});
+        if (!parsed) return fail(Code::json, "SQ-INF/entries.json: " + parsed.error.message);
+        if (parsed.value.object_if() == nullptr) return fail(Code::json, "SQ-INF/entries.json is not an object");
+        for (const auto& [path, v] : *parsed.value.object_if()) {
+            auto o = exploded_options(v, path);
+            if (!o) return std::unexpected(o.error());
+            metadata.emplace(path, std::move(*o));
+        }
+    }
+    // The files.
+    std::vector<std::pair<std::string, fs::path>> files;
+    fs::recursive_directory_iterator it(folder, fs::directory_options::none, ec), end;
+    if (ec) return fail(Code::io, std::format("cannot read {}: {}", folder.string(), ec.message()));
+    for (; it != end; it.increment(ec)) {
+        if (ec) return fail(Code::io, std::format("cannot read {}: {}", folder.string(), ec.message()));
+        const fs::path rel = it->path().lexically_relative(folder);
+        const std::string name = rel.generic_string();
+        const auto status = it->symlink_status(ec);
+        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6.1)", name);
+        if (it.depth() == 0 && fs::is_directory(status) && (name == ".squared" || name == ".git")) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (!fs::is_regular_file(status) || name == "SQ-INF/entries.json") continue;
+        files.emplace_back(name, it->path());
+    }
+    std::ranges::sort(files);
+    std::set<std::string, std::less<>> present;
+    for (const auto& [name, p] : files) present.insert(name);
+    for (const auto& [path, o] : metadata) {
+        if (!present.contains(path) && !pack_options.drop_orphans) {
+            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6.1)", path);
+        }
+    }
+    auto w = Writer::create(out, options);
+    if (!w) return std::unexpected(w.error());
+    if (key) w->sign_with(std::move(*key));
+    for (const auto& [name, p] : files) {
+        auto bytes = read_file(p);
+        if (!bytes) return fail(Code::io, "cannot read it", name);
+        PutOptions o;
+        if (auto m = metadata.find(name); m != metadata.end()) o = m->second;
+        if (auto r = w->put(name, *bytes, o); !r) return std::unexpected(r.error());
+    }
+    return w->commit();
 }
 
 Result<void> compact(const std::filesystem::path& path, WriteOptions options) {

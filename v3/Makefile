@@ -59,7 +59,7 @@ SQD_OBJS  := $(foreach u,$(SQD_UNITS),$(BUILD)/obj/sq.data/$(call sqd_name,$(u))
              $(BUILD)/obj/sq.data/module.o $(BUILD)/obj/sq.data/json.cpp.o $(BUILD)/obj/sq.data/json_value.cpp.o
 
 # The partitions, in the order they import each other.
-PARTS    := error bytes sha256 json fold zstd ed25519 archive
+PARTS    := error bytes sha256 json fold zstd ed25519 archive exploded
 OBJS     := $(BUILD)/obj/std.o $(SQD_OBJS) $(foreach p,$(PARTS),$(BUILD)/obj/$(p).o) $(BUILD)/obj/sq.cart.o
 C_OBJS   := $(BUILD)/obj/yyjson.o $(BUILD)/obj/monocypher.o $(BUILD)/obj/monocypher-ed25519.o
 READ_LIBS  := $(BUILD)/libsqcart.a $(BUILD)/libsqcart-unzstd.a
@@ -111,6 +111,7 @@ $(eval $(call part,fold,$(BUILD)/pcm/sq.cart-json.pcm src/casefold.inc))
 $(eval $(call part,zstd,$(BUILD)/pcm/sq.cart-error.pcm))
 $(eval $(call part,ed25519,))
 $(eval $(call part,archive,$(foreach p,error bytes sha256 json fold zstd ed25519,$(BUILD)/pcm/sq.cart-$(p).pcm) $(BUILD)/pcm/sq.data.pcm))
+$(eval $(call part,exploded,$(BUILD)/pcm/sq.cart-archive.pcm))
 
 $(BUILD)/pcm/sq.cart.pcm $(BUILD)/obj/sq.cart.o &: src/sq.cart.cppm $(foreach p,$(PARTS),$(BUILD)/pcm/sq.cart-$(p).pcm)
 	$(CXX) $(CXXFLAGS) -c $< -fmodule-output=$(BUILD)/pcm/sq.cart.pcm -o $(BUILD)/obj/sq.cart.o

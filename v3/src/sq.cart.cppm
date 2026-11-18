@@ -19,3 +19,4 @@ export import :json;
 export import :fold;
 export import :ed25519;
 export import :archive;
+export import :exploded;

@@ -6,11 +6,13 @@
 //   sqcart3 ls FILE                    the live entries: flags, size, codec, path, title
 //   sqcart3 cat FILE PATH              an entry's content, verified, to stdout
 //   sqcart3 info FILE                  the commit, the manifest, the signatures
+//   sqcart3 unpack FILE DIR [--merge]  the exploded form (§6.1): files, and SQ-INF/entries.json
 //
 //   sqcart3 new FILE MANIFEST          a new cartridge, its manifest from a file
 //   sqcart3 put FILE PATH SOURCE       an entry from a file (- for stdin), committed
 //   sqcart3 rm FILE PATH               an entry removed, committed
 //   sqcart3 compact FILE               one commit, its live entries only (§10.4)
+//   sqcart3 pack DIR FILE [--drop-orphans]  an exploded cartridge packed, as one commit
 //   sqcart3 keygen KEYFILE             an Ed25519 signing key (a 32-byte seed, in hex, mode 0600)
 //
 // Options for new, put and rm:
@@ -34,11 +36,13 @@ namespace {
 int usage() {
     std::println(std::cerr, "usage: sqcart3 check|ls|info FILE\n"
                             "       sqcart3 cat FILE PATH\n"
+                            "       sqcart3 unpack FILE DIR [--merge]\n"
 #ifndef SQCART3_READ_ONLY
                             "       sqcart3 new FILE MANIFEST [options]\n"
                             "       sqcart3 put FILE PATH SOURCE [options]\n"
                             "       sqcart3 rm FILE PATH [options]\n"
                             "       sqcart3 compact FILE\n"
+                            "       sqcart3 pack DIR FILE [--drop-orphans] [--sign KEYFILE --signer NAME]\n"
                             "       sqcart3 keygen KEYFILE\n"
                             "options: --title T --author A --media-type M --flags rwxm\n"
                             "         --store auto|stored|zstd|chunked --sign KEYFILE --signer NAME --fast"
@@ -93,6 +97,12 @@ int read_commands(std::string_view cmd, const std::vector<std::string_view>& arg
     }
     auto cart = Archive::open(file);
     if (!cart) return fail(cart.error());
+    if (cmd == "unpack" && (args.size() == 3 || (args.size() == 4 && args[3] == "--merge"))) {
+        auto n = unpack(*cart, std::filesystem::path(args[2]), {.merge = args.size() == 4});
+        if (!n) return fail(n.error());
+        std::println("{}: {} entries unpacked into {}", file.string(), *n, args[2]);
+        return 0;
+    }
     if (cmd == "ls" && args.size() == 2) {
         for (const Entry& e : cart->entries()) {
             std::println("{} {:>12} {:<9} {}{}", letters(e.flags), e.size, codec(e.codec), e.path, e.title ? "  \"" + *e.title + "\"" : "");
@@ -229,6 +239,27 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
         std::println("{}: compacted to {} bytes", file.string(), std::filesystem::file_size(file));
         return 0;
     }
+    if (cmd == "pack" && args.size() >= 3) {
+        bool drop = false;
+        std::vector<std::string_view> rest;
+        for (std::size_t i = 3; i < args.size(); ++i) {
+            if (args[i] == "--drop-orphans") drop = true;
+            else rest.push_back(args[i]);
+        }
+        const auto o = parse_options(rest);
+        if (!o) return usage();
+        std::optional<SigningKey> key;
+        if (o->key_file) {
+            key = load_key(*o->key_file, o->signer);
+            if (!key) return fail("not a key file: " + *o->key_file);
+        }
+        WriteOptions wo;
+        if (o->fast) wo.level = 3;
+        auto c = pack(file, std::filesystem::path(args[2]), wo, {.drop_orphans = drop}, std::move(key));
+        if (!c) return fail(c.error());
+        std::println("{}: packed into {}, {} entries{}", file.string(), args[2], c->live_count, c->signatures_length ? ", signed" : "");
+        return 0;
+    }
     const std::size_t positional = cmd == "put" ? 4 : 3;
     if ((cmd != "new" && cmd != "put" && cmd != "rm") || args.size() < positional) return usage();
     const auto o = parse_options(std::span(args).subspan(positional));
@@ -268,7 +299,7 @@ int main(int argc, char** argv) {
     const std::vector<std::string_view> args(argv + 1, argv + argc);
     if (args.size() < 2) return usage();
     const std::string_view cmd = args[0];
-    if (cmd == "check" || cmd == "ls" || cmd == "cat" || cmd == "info") return read_commands(cmd, args);
+    if (cmd == "check" || cmd == "ls" || cmd == "cat" || cmd == "info" || cmd == "unpack") return read_commands(cmd, args);
 #ifndef SQCART3_READ_ONLY
     return write_commands(cmd, args);
 #else

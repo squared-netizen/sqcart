@@ -79,7 +79,7 @@ Offline: everything else is in `../third_party`:
 | `:archive` | `Archive`, `Entry`, `Commit`, signatures, and `check` |
 
 `sqcart3` is both on the command line: `check`, `ls`, `cat`, `info` to read;
-`new`, `put`, `rm`, `compact` and `keygen` to write (`--sign KEYFILE` signs a
+`new`, `put`, `rm`, `compact`, `keygen` and `pack` to write (`unpack` reads), (`--sign KEYFILE` signs a
 commit). `make` also builds `sqcart3-read`, the read commands linked against
 the reading archives alone: it holds no zstd compressor.
 
@@ -105,7 +105,10 @@ that a reader can see.
   not written: on such a file system the writer refuses.
 - **Dictionaries.** The reader reads codec 2; the writer does not train or
   use dictionaries yet.
-- **Exploded form.** `sqcart3` has no `pack` or `unpack` (§6.1) yet.
+- **Paths from a Mac.** `pack` takes a folder's names as the file system
+  gives them; macOS gives them decomposed (NFD), and §6.1 wants them
+  converted to NFC, which needs the normalization tables this lacks (see
+  Normalization, below).
 - **Staging** is in memory: a commit's content is held until it is written.
   Staging large changes on disk is the Drive's (§10.5).
 
