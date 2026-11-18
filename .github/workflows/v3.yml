@@ -33,7 +33,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends make clang-$LLVM lld-$LLVM \
             libc++-$LLVM-dev libc++abi-$LLVM-dev
           /usr/lib/llvm-$LLVM/bin/clang++ --version | head -n 1
-          /usr/lib/llvm-$LLVM/bin/clang++ -stdlib=libc++ -print-library-module-manifest-path
+          manifest=$(readlink -f "$(/usr/lib/llvm-$LLVM/bin/clang++ -stdlib=libc++ -print-library-module-manifest-path)")
+          echo "std module manifest: $manifest"
+          cat "$manifest"
+          ls -l "$(dirname "$manifest")"/../share/libc++/v1/std.cppm || true
 
       - name: Build and test
         run: make -C v3 -j4 CXX=/usr/lib/llvm-$LLVM/bin/clang++ test

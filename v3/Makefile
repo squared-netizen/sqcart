@@ -30,8 +30,12 @@ CXXFLAGS := -std=c++23 $(STDLIB) $(OPT) $(WARN) -fprebuilt-module-path=$(BUILD)/
 LDFLAGS  := $(STDLIB) -lpthread
 
 # libc++'s std module sources, as the compiler names them.
-STD_MANIFEST := $(shell $(CXX) $(STDLIB) -print-library-module-manifest-path 2>/dev/null)
-STD_CPPM     := $(if $(filter /%,$(STD_MANIFEST)),$(dir $(STD_MANIFEST))$(shell sed -n 's/.*"source-path": *"\([^"]*std\.cppm\)".*/\1/p' $(STD_MANIFEST) | head -n 1))
+# Its paths are relative to the manifest itself, so follow any link to it
+# first (Debian's /lib/x86_64-linux-gnu/libc++.modules.json is one), and take
+# an absolute path as it is.
+STD_MANIFEST := $(shell readlink -f "$$($(CXX) $(STDLIB) -print-library-module-manifest-path 2>/dev/null)" 2>/dev/null)
+STD_SOURCE   := $(if $(STD_MANIFEST),$(shell sed -n 's/.*"source-path": *"\([^"]*std\.cppm\)".*/\1/p' $(STD_MANIFEST) 2>/dev/null | head -n 1))
+STD_CPPM     := $(if $(filter /%,$(STD_SOURCE)),$(STD_SOURCE),$(if $(STD_SOURCE),$(dir $(STD_MANIFEST))$(STD_SOURCE)))
 
 # squared's data module: its interface units in the order they import each
 # other (file:module name), then its implementation units.
