@@ -2,7 +2,8 @@
 
 **Status: draft, 2026-11-18, revised the same day after a red-team
 review (`sq-cartridge-3.0-red-team.md`, which explains every change and
-its evidence).** Nothing here is implemented. Version 2.0
+its evidence), and with the hash, signature library and chunk size
+decided (Appendix B.1).** Nothing here is implemented. Version 2.0
 (`sq-cartridge-2.0.md`) stays the normative format until this one is
 accepted and sqcart reads and writes it.
 
@@ -996,7 +997,7 @@ dictionaries, and, for an exploded cartridge, orphans in
   `SQ-INF/manifest.json` once, through square (§6.2).
 - sqterm's packages (`.tar.zst` with an `SQ-INF/manifest.json` inside)
   can become 3.0 cartridges, read by pkg through sqcart's reader. That
-  is a separate decision, recorded in Appendix B.
+  is a separate decision, recorded in Appendix B.2.
 
 ## Appendix A: byte layouts
 
@@ -1097,31 +1098,46 @@ size is 64 × ⌈size / 2^20⌉.
 | 24 | 8 | reserved, zero |
 | 32 | 32 | SHA-256 of the chunk's uncompressed bytes |
 
-## Appendix B: open decisions
+## Appendix B: decisions
 
-1. **SHA-256 or BLAKE3.** SHA-256 is used everywhere in the SDK today
-   (sources.lock, pkg, apkpack's signing) and has hardware support on
-   arm64. BLAKE3 is several times faster in software and is a tree hash
-   by design, which is what §9.1 builds by hand. Provisional: SHA-256
-   with the 1 MiB tree of §9.1, for one hash across the SDK.
-2. **Ed25519's library.** Monocypher (CC0/BSD-2, small, audited) is the
-   candidate; apkpack uses BearSSL, which has no Ed25519. Two small
-   crypto libraries, or one larger one (mbedTLS) for both.
-3. **The delta chain limit.** 32 bounds the worst lookup at 33 binary
+### B.1 Decided (2026-11-18)
+
+1. **SHA-256, not BLAKE3.** Every digest in this format is SHA-256: entry
+   digests with the 1 MiB tree of §9.1, chunk hashes, the content digest,
+   commit records and superblock checksums. SHA-256 is what the SDK uses
+   everywhere already (sources.lock, pkg's index, apkpack's signing),
+   arm64 phones compute it in hardware (the SHA-2 instructions of ARMv8),
+   and the one thing BLAKE3 would add, verifying part of an entry, §9.1
+   builds from SHA-256 leaves. One hash across the SDK, and one less
+   library.
+2. **Monocypher for Ed25519.** Signatures (§9.3) are verified and made
+   with Monocypher (CC0 or BSD-2-Clause, one C file and its header, and an
+   independent audit), using its `optional/monocypher-ed25519` functions:
+   Monocypher's default `crypto_eddsa_*` uses BLAKE2b and is not Ed25519,
+   so a reader that called those would reject every valid signature. The
+   library is vendored, as yyjson and zstd are, with a test of RFC 8032's
+   vectors and of §9.3's rejections (a non-canonical S or point) before it
+   is relied on. apkpack keeps BearSSL for the APK's own signature, which
+   Android defines and Ed25519 is not part of.
+3. **1 MiB chunks, fixed.** Chunks (§4.5) and the leaves of the digest's
+   tree (§9.1) are 2^20 bytes for every entry. A chunk table costs 64 bytes
+   a MiB (0.006%), a 10 GiB entry's table is 640 KiB, and changing one
+   byte rewrites 1 MiB. It is fixed, not chosen per entry, so an entry's
+   digest never depends on a writer's choice; a different size would be a
+   new major version.
+
+### B.2 Open
+
+1. **The delta chain limit.** 32 bounds the worst lookup at 33 binary
    searches. A smaller limit compacts more often; a larger one commits
    more cheaply between compactions.
-4. **The chunk size.** 1 MiB balances a chunk table's size (64 bytes per
-   MiB, 0.006%) against the cost of rewriting a chunk for a one-byte
-   change. A smaller chunk suits databases; a larger one, video. It is
-   fixed, not per entry, so that the digest of §9.1 never depends on a
-   writer's choice.
-5. **sqterm's packages as 3.0 cartridges.** pkg would read `.sq`
+2. **sqterm's packages as 3.0 cartridges.** pkg would read `.sq`
    through sqcart's reader instead of tar and zstd, and a package would
    gain per-file metadata and a signature. The cost is that a package
    is no longer a tarball a person can open with `tar`.
-6. **Per-kind extensions.** 2.0 Appendix B.2's question returns: one
+3. **Per-kind extensions.** 2.0 Appendix B.2's question returns: one
    `.sq` for everything, or `.sqm` for manuals and others for
    readability, with the manifest still authoritative.
-7. **Record schemas.** §5 names a schema by a consumer's string. Whether
+4. **Record schemas.** §5 names a schema by a consumer's string. Whether
    the SDK should share schemas (a JSON Schema per name, in a cartridge
    of its own) is open.
