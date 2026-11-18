@@ -78,10 +78,11 @@ Offline: everything else is in `../third_party`:
 | `:ed25519` | verification that refuses non-canonical encodings (§9.3) |
 | `:archive` | `Archive`, `Entry`, `Commit`, signatures, and `check` |
 
-`sqcart3` is both on the command line: `check`, `ls`, `cat`, `info` to read;
-`new`, `put`, `rm`, `compact`, `keygen` and `pack` to write (`unpack` reads), (`--sign KEYFILE` signs a
-commit). `make` also builds `sqcart3-read`, the read commands linked against
-the reading archives alone: it holds no zstd compressor.
+`sqcart3` is both on the command line: `check`, `ls`, `cat`, `info` and
+`unpack` to read; `new`, `put`, `rm`, `compact`, `keygen` and `pack` to write
+(`--sign KEYFILE` signs a commit). `make` also builds `sqcart3-read`, the
+read commands linked against the reading archives alone: it holds no zstd
+compressor.
 
 | Archive | Holds | Link for |
 |---|---|---|
