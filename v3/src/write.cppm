@@ -1164,7 +1164,8 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
         for (const auto& [path, v] : *parsed.value.object_if()) {
             auto o = exploded_options(v, path);
             if (!o) return std::unexpected(o.error());
-            metadata.emplace(path, std::move(*o));
+            if (!valid_utf8(path)) return fail(Code::path, "a name in SQ-INF/entries.json that is not UTF-8");
+            metadata.emplace(nfc(path), std::move(*o));
         }
     }
     // The files.
@@ -1174,7 +1175,11 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
     for (; it != end; it.increment(ec)) {
         if (ec) return fail(Code::io, std::format("cannot read {}: {}", folder.string(), ec.message()));
         const fs::path rel = it->path().lexically_relative(folder);
-        const std::string name = rel.generic_string();
+        std::string name = rel.generic_string();
+        // Names as the file system gives them; macOS decomposes them (NFD),
+        // and every path is NFC (§4.1, §6.1).
+        if (!valid_utf8(name)) return fail(Code::path, "a name that is not UTF-8", name);
+        name = nfc(name);
         const auto status = it->symlink_status(ec);
         if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6.1)", name);
         if (it.depth() == 0 && fs::is_directory(status) && (name == ".squared" || name == ".git")) {
@@ -1182,6 +1187,9 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
             continue;
         }
         if (!fs::is_regular_file(status) || name == "SQ-INF/entries.json") continue;
+        if (!files.empty() && std::ranges::any_of(files, [&](const auto& f) { return f.first == name; })) {
+            return fail(Code::path, "two names in the folder that are one in NFC", name);
+        }
         files.emplace_back(name, it->path());
     }
     std::ranges::sort(files);

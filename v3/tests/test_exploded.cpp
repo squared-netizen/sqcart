@@ -111,6 +111,18 @@ int main() {
         check(!fs::exists(root() / "outside/north"), "and wrote nothing outside");
     }
 
+    // A Mac's decomposed name is packed as NFC (§6.1).
+    {
+        const fs::path mac = root() / "mac";
+        write(mac / "SQ-INF/manifest.json", text(manifest()));
+        write(mac / "cafe\u0301.txt", "coffee");
+        write(mac / "SQ-INF/entries.json", R"({"cafe\u0301.txt":{"title":"Coffee"}})");
+        auto r = pack(mac, root() / "mac.sq", quick());
+        check(r.has_value(), r ? "pack a decomposed name" : r.error().message);
+        auto m = Archive::open(root() / "mac.sq");
+        check(m && m->find("caf\u00e9.txt") && m->find("caf\u00e9.txt")->title == "Coffee", "stored as NFC, its metadata found");
+    }
+
     // Orphans.
     {
         const fs::path orphan = root() / "orphan";

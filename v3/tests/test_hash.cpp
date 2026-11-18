@@ -57,6 +57,15 @@ int main() {
     check(paths_collide("K", "k"), "the Kelvin sign folds to k");
     check(!paths_collide("a/b", "a/c"), "different paths do not");
 
+    // §4.1: Normalization Form C (checked here against Python's unicodedata for
+    // every code point and 20,000 mixed strings, when it was written).
+    check(nfc("e\u0301") == "\u00e9", "e + acute composes");
+    check(nfc("\u212b") == "\u00c5", "the Angstrom sign becomes \u00c5");
+    check(nfc("\u1100\u1161\u11a8") == "\uac01", "Hangul jamo compose");
+    check(nfc("a\u0323\u0302") == nfc("a\u0302\u0323") && nfc("a\u0302\u0323") == "\u1ead", "marks in canonical order, then composed");
+    check(nfc("\u0958") == "\u0915\u093c", "a composition exclusion stays decomposed");
+    check(is_nfc("plain/ascii.txt") && is_nfc("caf\u00e9") && !is_nfc("cafe\u0301"), "is_nfc");
+
     // RFC 8032 test 1: the empty message.
     const auto pk = from_hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
     const auto sig = from_hex(

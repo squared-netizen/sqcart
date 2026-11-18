@@ -256,6 +256,7 @@ struct Chunk {
     if (path.empty()) return "an empty path";
     if (path.size() > max_bytes) return std::format("a path of {} bytes, past {}", path.size(), max_bytes);
     if (!valid_utf8(path)) return "a path that is not valid UTF-8";
+    if (!is_nfc(path)) return "a path not in Normalization Form C (a Mac's decomposed names: pack converts them)";
     if (path.front() == '/') return "an absolute path";
     for (std::size_t i = 0; i < path.size(); ++i) {
         const auto c = static_cast<unsigned char>(path[i]);

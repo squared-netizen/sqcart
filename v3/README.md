@@ -76,7 +76,7 @@ Offline: everything else is in `../third_party`:
 | `:bytes` | where the bytes are (pread on a file, or memory), little-endian fields, overflow-checked sums |
 | `:sha256` | SHA-256, and the entry digest's tree over 1 MiB leaves (§9.1) |
 | `:json` | I-JSON and RFC 8785, through sq.data |
-| `:fold` | Unicode full case folding, for paths that collide (§4.1); `casefold.inc` is generated from Python's `str.casefold` |
+| `:fold` | Unicode for paths (§4.1): full case folding, for paths that collide, and Normalization Form C, which every path must be in (the reader refuses others; `pack` converts a Mac's decomposed names). `casefold.inc` and `nfc.inc` are generated from Python's `str.casefold` and `unicodedata` (`tools/gen_casefold.py`, `tools/gen_nfc.py`); NFC was checked against Python for every code point and 20,000 mixed strings |
 | `:zstd` | one frame, its size and window and dictionary checked before it is decoded (§4.3) |
 | `:ed25519` | verification that refuses non-canonical encodings (§9.3) |
 | `:archive` | `Archive`, `Entry`, `Commit`, signatures, and `check` |
@@ -104,15 +104,9 @@ that a reader can see.
 
 ## Not yet
 
-- **Paths from a Mac.** `pack` takes a folder's names as the file system
-  gives them; macOS gives them decomposed (NFD), and §6.1 wants them
-  converted to NFC, which needs the normalization tables this lacks (see
-  Normalization, below).
 - **Staging** is in memory: a commit's content is held until it is written.
   Staging large changes on disk is the Drive's (§10.5).
 
-- **Normalization.** Paths must be NFC (§4.1); like the 2.0 library, this
-  reader does not check it (it would need the NFC tables).
 - **Old data regions.** A run may name data an earlier commit wrote
   (§3.6). The reader checks it lies in the file, past the header, and in
   no index, string table or record of the commits it walks; commits before
