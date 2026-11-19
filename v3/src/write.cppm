@@ -1411,9 +1411,23 @@ Result<Commit> Writer::commit_staged() {
         live.insert_or_assign(path, e);
     }
     if (!live.contains("SQ-INF/manifest.json")) return fail(Code::malformed, "a cartridge needs SQ-INF/manifest.json (§4.1)");
-    // Case collisions (§4.1), before anything is sealed.
+    // Case collisions (§4.1), before anything is sealed; none to look for
+    // when the manifest committed says case_sensitive.
+    bool case_sensitive = false;
+    if (auto m = staged_.find("SQ-INF/manifest.json"); m != staged_.end() && m->second.kind == Staged::Kind::put) {
+        auto parsed = data::parse_json(std::string_view(reinterpret_cast<const char*>(m->second.content.data()), m->second.content.size()));
+        if (const data::JsonValue* cs = parsed ? parsed.value.find("case_sensitive") : nullptr; cs && cs->boolean_if()) case_sensitive = *cs->boolean_if();
+    } else if (has_commit_) {
+        if (!before) {
+            auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
+            if (!a) return std::unexpected(a.error());
+            before = std::move(*a);
+        }
+        case_sensitive = before->manifest().case_sensitive;
+    }
     std::map<std::u32string, std::string_view> keys;
     for (const auto& [path, e] : live) {
+        if (case_sensitive) break;
         auto [it, fresh] = keys.try_emplace(collision_key(path), path);
         if (!fresh) return fail(Code::path, std::format("collides with \"{}\" on a case-insensitive file system", it->second), path);
     }

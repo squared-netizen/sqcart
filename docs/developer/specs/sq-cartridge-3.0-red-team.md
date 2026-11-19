@@ -254,6 +254,16 @@ after NFC. Pack converts macOS's NFD names to NFC first (git needed
 `core.precomposeunicode` for the same thing). Unpack also refuses names
 Windows cannot create (§4.1).
 
+**Later (2026-11-19): a case-sensitive opt-in.** Linux's kernel headers
+hold names that differ only by case (`xt_MARK.h`, `xt_mark.h`), and
+sqterm's sysroot package carries them. A manifest's `"case_sensitive":
+true` lets such a cartridge be read. What made R13 dangerous does not come
+back with it: the danger was one file overwriting another on a file system
+that folds case, and §6.1's unpack never overwrites (each file is created
+exclusively), so there the second of two colliding paths fails with an
+error, and nothing is lost or replaced. A cartridge without the member
+keeps the rule.
+
 ### R14. A workspace packs its own working state (Medium)
 
 A workspace is an exploded cartridge, and the draft kept square's

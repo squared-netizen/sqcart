@@ -132,6 +132,21 @@ int main() {
         check(refused(b.file(), Code::path), "R13: README.md and Readme.md collide");
         auto s = simple({{.path = "straße", .content = bytes("1")}, {.path = "STRASSE", .content = bytes("2")}});
         check(refused(s.file(), Code::path), "R13: straße and STRASSE collide");
+        // A manifest that says case_sensitive: the paths stay distinct.
+        Builder cs;
+        cs.commit({{.path = "SQ-INF/manifest.json",
+                    .content = bytes(R"({"case_sensitive":true,"format":"squared-cartridge","format_version":3,"id":"a","kind":"package","version":"1"})")},
+                   {.path = "xt_MARK.h", .content = bytes("target")},
+                   {.path = "xt_mark.h", .content = bytes("match")}});
+        auto c = Archive::open_memory(cs.file());
+        check(c && c->entries() && c->entries()->size() == 3, "R13: a case_sensitive cartridge holds both");
+        check(c && text(*c->read(*c->find("xt_MARK.h"))) == "target" && text(*c->read(*c->find("xt_mark.h"))) == "match",
+              "R13: and reads each as itself");
+        check(check_memory(cs.file()).ok(), "R13: check passes it");
+        Builder bad;
+        bad.commit({{.path = "SQ-INF/manifest.json",
+                     .content = bytes(R"({"case_sensitive":"yes","format":"squared-cartridge","format_version":3,"id":"a","kind":"package","version":"1"})")}});
+        check(!Archive::open_memory(bad.file()), "R13: a case_sensitive that is not a boolean is refused");
     }
     // R19: a manifest that is not I-JSON.
     {

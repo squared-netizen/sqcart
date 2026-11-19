@@ -336,6 +336,26 @@ int main() {
         check(read_back(p, "big.bin") == model && checks(p), "and nothing changed");
     }
 
+    // The writer: colliding paths only under a case_sensitive manifest.
+    {
+        const auto p = scratch("case.sq");
+        std::filesystem::remove(p);
+        auto w = Writer::create(p, quick_options());
+        static_cast<void>(w->put("SQ-INF/manifest.json", manifest()));
+        static_cast<void>(w->put("xt_MARK.h", bytes("target")));
+        static_cast<void>(w->put("xt_mark.h", bytes("match")));
+        auto refused = w->commit();
+        check(!refused && refused.error().code == Code::path, "colliding paths are refused by default");
+        static_cast<void>(w->put("SQ-INF/manifest.json",
+                                 bytes(R"({"case_sensitive":true,"format":"squared-cartridge","format_version":3,"id":"t","kind":"package","version":"1"})")));
+        auto c = w->commit();
+        check(c.has_value(), c ? "and committed under case_sensitive" : c.error().message);
+        static_cast<void>(w->put("XT_MARK.h", bytes("a third")));
+        check(w->commit().has_value(), "a later commit keeps to the committed manifest");
+        check(read_back(p, "xt_mark.h") == bytes("match") && read_back(p, "XT_MARK.h") == bytes("a third"), "each reads as itself");
+        check(checks(p), "check passes");
+    }
+
     // set_commit_time: the next commit records it.
     {
         const auto p = scratch("time.sq");

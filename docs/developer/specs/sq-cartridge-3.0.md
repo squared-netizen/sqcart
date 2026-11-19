@@ -325,6 +325,18 @@ they are equal after Unicode full case folding (Unicode `CaseFolding.txt`,
 status C and F) and NFC. Android's shared storage, exFAT, FAT, macOS
 and Windows all fold case, and fold more than ASCII.
 
+**Case-sensitive cartridges.** A manifest with `"case_sensitive": true`
+(§7) says the cartridge is for case-sensitive file systems only, and the
+rule above does not apply to it: its live paths MAY collide under case
+folding, and a reader MUST NOT refuse it for that. They stay distinct
+paths (logical paths are case-sensitive). Unpacking it onto a file system
+that folds case fails, at the second of two colliding paths, rather than
+losing the first: §6.1's unpack never overwrites. It is for content that
+holds such names already, as Linux's kernel headers do
+(`linux/netfilter/xt_MARK.h` and `xt_mark.h`, in sqterm's sysroot
+package). `case_sensitive` MUST be `true` or `false` when present; absent
+is `false`.
+
 A writer SHOULD warn about, and `sqcart unpack` MUST refuse, a path that
 cannot be created as a file on the target system: on Windows, a segment
 named `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9` or `LPT1`–`LPT9` (with
@@ -640,6 +652,8 @@ The envelope of 2.0 §5.1 carries over with these changes:
   commit record (§9). A 3.0 writer MUST NOT write it, and a reader MUST
   ignore one.
 - The manifest is I-JSON (§5).
+- `case_sensitive` is added: `true` lets the cartridge's paths collide
+  under case folding, for case-sensitive file systems only (§4.1).
 - **One file extension.** A cartridge's file name ends in `.sq`, whatever
   its kind (Appendix B.2). The manifest's `kind` says what it is: a reader
   MUST NOT take a kind from a file's name, and a tool that lists or opens
