@@ -982,22 +982,35 @@ folder when a packed cartridge fails verification.
 
 ## 12. Validation order
 
-A reader validates in this order, and stops at the first failure:
+A reader validates what it uses before it uses it, and stops at the first
+failure. Opening a cartridge costs what §1 promises (a fixed header and
+the commit records), not the size of its index, so validation happens in
+three places:
 
-1. Header: magic, major version (§3.2).
-2. Superblocks, the chosen commit record and its required feature bits
-   (§3.3, §3.4, §3.9).
-3. Bounds of every region, index, string table, chunk table and run the
-   commit reaches, against the file, the regions and the limits (§3.6,
-   §3.8), and the overlap rule of §3.6.
-4. The index's order, uniqueness and paths, including case collisions
-   (§3.5, §4.1).
-5. The manifest: a live `SQ-INF/manifest.json`, then the envelope as in
-   2.0 §12.1, with `format_version` 3, as I-JSON.
-6. Entry digests, as entries are read (§9.1).
-7. Signatures, when the caller asks (§9.3).
+1. **At open.** The header: magic, major version (§3.2). The superblocks,
+   the chosen commit record, its required feature bits, its regions'
+   bounds and the commit chain down to the full index (§3.3, §3.4, §3.9).
+   The manifest: a live `SQ-INF/manifest.json`, then the envelope as in
+   2.0 §12.1, with `format_version` 3, as I-JSON (§7).
+2. **When an entry is used.** Its record, before the reader returns it:
+   its path (§4.1), flags, codec, sizes and strings (§4.2, §4.3, §3.8), and
+   that its run or chunk table lies in a data or chunk-table region of its
+   own commit or an earlier one (§3.6: the reader walks every commit's
+   record, once, to know them). Its content against its digest, as it is
+   read (§9.1).
+3. **When the whole state is used.** Listing the live entries, computing
+   the content digest, verifying signatures over it: every index's order
+   and uniqueness (§3.5), every record as in 2, the live count, case
+   collisions (§4.1) and the features the state uses (§3.9).
 
-A validator (`sqcart check`) does all of the above for every entry, and
+A binary search over an index that is not sorted can miss a path, so a
+reader that finds nothing where an entry should be cannot tell a broken
+index from an absent entry until 3. Nothing a reader returns is ever
+unchecked: a missed entry is reported as absent, never as something else.
+Signatures (§9.3) are verified when the caller asks, over the state that
+3 has checked.
+
+A validator (`sqcart check`) does all three for every entry, and
 also reports what a reader may ignore: trailing bytes, non-zero padding
 or reserved fields, attributes not in canonical form, unused
 dictionaries, and, for an exploded cartridge, orphans in

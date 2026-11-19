@@ -438,7 +438,7 @@ public:
         auto file = Appender::open(path, false);
         if (!file) return std::unexpected(file.error());
         Writer w(std::move(*lock), std::move(*file), std::move(options));
-        w.adopt(*archive);
+        if (auto r = w.adopt(*archive); !r) return std::unexpected(r.error());
         if (const std::uint64_t end = archive->commit().offset + commit_record; w.file_.size() != end) {
             if (auto r = w.file_.truncate(end); !r) return std::unexpected(r.error());
         }
@@ -564,11 +564,16 @@ private:
     Writer(Lock lock, Appender file, WriteOptions options)
         : lock_(std::move(lock)), file_(std::move(file)), options_(std::move(options)) {}
 
-    void adopt(const Archive& a) {
+    /// The state a writer builds on: all of it checked (the reader's
+    /// entries(), §3.5).
+    Result<void> adopt(const Archive& a) {
+        auto live = a.entries();
+        if (!live) return std::unexpected(live.error());
         live_.clear();
-        for (const Entry& e : a.entries()) live_.emplace(e.path, e);
+        for (const Entry& e : *live) live_.emplace(e.path, e);
         current_ = a.commit();
         has_commit_ = true;
+        return {};
     }
 
     /// A dictionary by ID: trained by this writer, or read from the cartridge.
@@ -578,7 +583,9 @@ private:
         if (!live_.contains(path)) return fail(Code::not_found, std::format("no dictionary {}", id));
         auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
         if (!a) return std::unexpected(a.error());
-        auto bytes = a->read(*a->find(path));
+        auto e = a->find(path);
+        if (!e) return std::unexpected(e.error());
+        auto bytes = a->read(*e);
         if (!bytes) return std::unexpected(bytes.error());
         return &dictionaries_.emplace(id, std::move(*bytes)).first->second;
     }
@@ -1081,7 +1088,7 @@ Result<Commit> Writer::commit() {
     // Read back what was written, as any reader would: the state must open.
     auto check = Archive::open(file_.path(), ReadOptions{options_.limits});
     if (!check) return std::unexpected(Error{check.error().code, "the commit does not read back: " + check.error().message, check.error().entry});
-    adopt(*check);
+    if (auto r = adopt(*check); !r) return std::unexpected(r.error());
     staged_.clear();
     return *c;
 }
@@ -1233,7 +1240,9 @@ Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
     if (auto r = out->append(header); !r) return r;
     // Dictionaries no live entry uses are dropped.
     std::set<std::uint32_t> used;
-    for (const Entry& e : old->entries()) {
+    auto old_live = old->entries();
+    if (!old_live) return std::unexpected(old_live.error());
+    for (const Entry& e : *old_live) {
         if (e.codec == Codec::zstd_dict) used.insert(e.dictionary);
         if (e.codec == Codec::chunked) {
             auto cs = old->chunks(e);
@@ -1255,7 +1264,7 @@ Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
         if (auto r = out->append(*bytes); !r) return std::unexpected(r.error());
         return where;
     };
-    for (Entry e : old->entries()) {
+    for (Entry e : *old_live) {
         if (e.flags & flag::dictionary) {
             const std::string_view name = std::string_view(e.path).substr(20);  // SQ-INF/dictionaries/
             std::uint32_t id = 0;
@@ -1283,7 +1292,7 @@ Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
     // The signature block, copied: the digest is unchanged, unless a
     // dictionary was dropped (then the state changed, and it is not).
     std::optional<std::vector<std::byte>> signatures;
-    const bool same_state = live.size() == old->entries().size();
+    const bool same_state = live.size() == old_live->size();
     if (same_state && old->commit().signatures_length != 0) {
         auto block = source->read(old->commit().signatures_offset, old->commit().signatures_length);
         if (!block) return std::unexpected(block.error());

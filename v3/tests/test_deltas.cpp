@@ -33,7 +33,7 @@ int main() {
     const auto c = cart->find("c.txt");
     check(c && c->title == "See" && c->offset == c_run, "a metadata-only change names the old run");
     if (c) check(text(*cart->read(*c)) == "new c", "and reads it");
-    check(cart->entries().size() == 3, "manifest, a and c are live");
+    check(cart->entries()->size() == 3, "manifest, a and c are live");
     check(check_memory(b.file()).ok(), "check passes");
 
     // Old content stays in the file, unreachable (§3.6).
@@ -50,7 +50,30 @@ int main() {
     // A tombstone in a full index is refused (§3.5).
     Builder t;
     t.commit({{.path = "SQ-INF/manifest.json", .content = manifest()}, {.path = "gone", .tombstone = true}});
-    check(!Archive::open_memory(t.file()), "a tombstone in a full index is refused");
+    {
+        auto a = Archive::open_memory(t.file());
+        check(!a || !a->entries(), "a tombstone in a full index is refused");
+        check(!a || (!a->find("gone") && a->find("gone").error().code == Code::malformed), "and find() says why, not just not found");
+    }
+
+    // §3.6: a run may name data an earlier commit wrote, even one before the
+    // full index a lookup stops at; never anything else of that commit.
+    {
+        auto f = simple({{.path = "a", .content = bytes("first a")}});
+        const std::uint64_t a_run = f.runs["a"];
+        f.commit({{.path = "SQ-INF/manifest.json", .content = manifest(), .reuse_run = f.runs["SQ-INF/manifest.json"]},
+                  {.path = "a", .content = bytes("first a"), .reuse_run = a_run}});  // commit 2: full, naming commit 1's runs
+        auto ok = Archive::open_memory(f.file());
+        check(ok && ok->chain().size() == 1 && ok->find("a") && *ok->read(*ok->find("a")) == bytes("first a"),
+              "a full index naming data from a commit before it reads");
+        auto g = simple({{.path = "a", .content = bytes("first a")}});
+        const std::uint64_t g_index = Archive::open_memory(g.file())->commit().index_offset;
+        g.commit({{.path = "SQ-INF/manifest.json", .content = manifest(), .reuse_run = g.runs["SQ-INF/manifest.json"]},
+                  {.path = "a", .content = bytes("first a"), .reuse_run = g_index}});
+        auto bad = Archive::open_memory(g.file());
+        check(bad && !bad->find("a") && bad->find("a").error().code == Code::malformed,
+              "a run pointing into an older commit's index is refused (all commits' regions are walked)");
+    }
 
     // A delta whose chain length does not follow its predecessor's.
     auto d = simple({{.path = "a", .content = bytes("x")}});

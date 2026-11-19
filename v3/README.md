@@ -94,6 +94,22 @@ compressor.
 | `libsqcart-write.a` | sq.cart.write | writing |
 | `libsqcart-zstd.a` | all of zstd (its decoder too: never with `-unzstd`) | writing |
 
+## Opening, and what is checked when
+
+Open reads the header, the superblocks, the commit records down to the full
+index, and the manifest, and maps the indexes and string tables in place
+(`mmap`, read-only) rather than reading them. Each record `find()` returns
+is checked as it is returned; each run must lie in a data region of its own
+commit or an earlier one, which the reader learns by walking every commit's
+record once, on first need. The whole state (every index's order, every
+record, the live count, collisions, features) is checked the first time
+something needs all of it: `entries()`, the content digest, `check()`
+(§12). On a cartridge of 100,000 entries: open 8 ms, a `find` 9 µs, the
+whole state 107 ms.
+
+`find()` returns the entry, or `Code::not_found`, or the error that stops
+it; `entries()` returns the live entries, or the error that stops them.
+
 ## The tests
 
 `tests/testing.cppm` (`sq.cart.testing`) writes 3.0 cartridges byte by byte
@@ -107,14 +123,3 @@ that a reader can see.
 - **Staging** is in memory: a commit's content is held until it is written.
   Staging large changes on disk is the Drive's (§10.5).
 
-- **Old data regions.** A run may name data an earlier commit wrote
-  (§3.6). The reader checks it lies in the file, past the header, and in
-  no index, string table or record of the commits it walks; commits before
-  the full index are not read, so a run pointing into one of their indexes
-  is not caught (its content still has to match its digest).
-- **Opening costs the whole index.** Open checks every index the chain
-  holds (order, paths, collisions, runs) and the manifest, so it reads
-  every entry record once: §1's "opening reads a fixed header and one commit
-  record" holds for the header and records, not for validation.
-- **Memory.** Indexes and string tables are read into memory, and an
-  unchunked entry is read whole to be verified. Mapping them is later.

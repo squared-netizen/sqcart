@@ -10,6 +10,7 @@ module;
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -57,6 +58,14 @@ public:
     /// Exactly out.size() bytes at `offset`.
     [[nodiscard]] virtual Result<void> read(std::uint64_t offset, std::span<std::byte> out) const = 0;
 
+    /// The bytes at [offset, offset + n) in place, without a copy, where the
+    /// source can give them (a memory image, a mapped file); else nothing,
+    /// and the caller reads them.
+    [[nodiscard]] virtual std::optional<std::span<const std::byte>> view(std::uint64_t offset, std::uint64_t n) const {
+        static_cast<void>(offset), static_cast<void>(n);
+        return std::nullopt;
+    }
+
     [[nodiscard]] Result<std::vector<std::byte>> read(std::uint64_t offset, std::uint64_t n) const {
         const auto end = add(offset, n);
         if (!end || *end > size_) return fail(Code::malformed, "a read past the end of the cartridge");
@@ -78,6 +87,11 @@ public:
         std::ranges::copy(bytes_.subspan(static_cast<std::size_t>(offset), out.size()), out.begin());
         return {};
     }
+    std::optional<std::span<const std::byte>> view(std::uint64_t offset, std::uint64_t n) const override {
+        const auto end = add(offset, n);
+        if (!end || *end > size_) return std::nullopt;
+        return bytes_.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(n));
+    }
 
 private:
     std::span<const std::byte> bytes_;
@@ -95,7 +109,19 @@ public:
         }
         return std::unique_ptr<Source>(new FileSource(fd, static_cast<std::uint64_t>(st.st_size)));
     }
-    ~FileSource() override { ::close(fd_); }
+    ~FileSource() override {
+        if (map_ != nullptr) ::munmap(map_, static_cast<std::size_t>(size_));
+        ::close(fd_);
+    }
+    /// From the file mapped read-only at open (indexes and string tables are
+    /// read in place, §3.5). A writer only ever appends, truncates bytes past
+    /// the last commit, or renames a new file over this one, so the bytes a
+    /// reader's commits reach never change under the mapping.
+    std::optional<std::span<const std::byte>> view(std::uint64_t offset, std::uint64_t n) const override {
+        const auto end = add(offset, n);
+        if (map_ == nullptr || !end || *end > size_) return std::nullopt;
+        return std::span<const std::byte>(static_cast<const std::byte*>(map_) + offset, static_cast<std::size_t>(n));
+    }
     FileSource(const FileSource&) = delete;
     FileSource& operator=(const FileSource&) = delete;
 
@@ -116,8 +142,15 @@ public:
     }
 
 private:
-    FileSource(int fd, std::uint64_t size) : fd_(fd) { size_ = size; }
+    FileSource(int fd, std::uint64_t size) : fd_(fd) {
+        size_ = size;
+        if (size > 0) {
+            void* m = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ, MAP_SHARED, fd, 0);
+            if (m != MAP_FAILED) map_ = m;  // else everything is read with pread
+        }
+    }
     int fd_;
+    void* map_ = nullptr;
 };
 
 }  // namespace sq::cart

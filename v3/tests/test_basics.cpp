@@ -39,7 +39,7 @@ int main() {
     check(cart.has_value(), cart ? "opens" : cart.error().message);
     if (!cart) return report("basics");
 
-    check(cart->entries().size() == 6, "six live entries");
+    check(cart->entries()->size() == 6, "six live entries");
     check(cart->manifest().id == "data.test-world" && cart->manifest().kind == "data", "the manifest's id and kind");
     check(cart->trailing_bytes() == 0, "no trailing bytes");
     check(cart->commit().sequence == 1 && cart->chain().size() == 1, "one commit");
@@ -86,7 +86,7 @@ int main() {
         out.write(reinterpret_cast<const char*>(b.file().data()), static_cast<std::streamsize>(b.file().size()));
     }
     auto from_file = Archive::open(path);
-    check(from_file && from_file->entries().size() == 6, "opens from a file");
+    check(from_file && from_file->entries()->size() == 6, "opens from a file");
     if (from_file) check(text(*from_file->read(*from_file->find("README.md"))) == "# hello\n", "reads from a file");
     std::filesystem::remove(path);
 

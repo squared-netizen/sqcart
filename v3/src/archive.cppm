@@ -302,11 +302,17 @@ struct Region {
     std::string_view name;
 };
 
-/// One commit as the reader walks it: its record, index and strings.
+/// One commit as the reader walks it: its record, and its index and string
+/// table, in place in a mapped file where the source allows (else copied).
 struct Loaded {
     Commit commit;
-    std::vector<std::byte> index;
-    std::vector<std::byte> strings;
+    std::span<const std::byte> index, strings;
+    std::vector<std::byte> owned_index, owned_strings;
+};
+
+/// A region of one commit (§3.4), for the bounds runs must keep (§3.6).
+struct CommitRegion {
+    std::uint64_t offset, length, sequence;
 };
 
 [[nodiscard]] Slot read_slot(std::span<const std::byte> header, std::uint64_t at, std::uint64_t file_size) {
@@ -521,6 +527,14 @@ export namespace sq::cart {
 
 /// An opened 3.0 cartridge, at the commit its superblocks name (§3.3).
 /// Immutable once open: concurrent const use is safe. Move-only.
+///
+/// Open reads the header, the superblocks, the commit records down to the
+/// full index, and the manifest; its indexes and string tables are mapped,
+/// not read (§12). Every record find() returns is checked when it is
+/// returned, and every byte read is checked against its digest. The whole
+/// state (every index's order, every record, the live count, collisions,
+/// the features) is checked the first time something needs all of it:
+/// entries(), the content digest, check().
 class Archive {
 public:
     [[nodiscard]] static Result<Archive> open(const std::filesystem::path& path, const ReadOptions& options = {}) {
@@ -547,18 +561,23 @@ public:
     }
     [[nodiscard]] const Manifest& manifest() const noexcept { return manifest_; }
 
-    /// A live entry, or nothing (§3.5).
-    [[nodiscard]] std::optional<Entry> find(std::string_view path) const {
+    /// A live entry (§3.5), its record checked; Code::not_found when there
+    /// is none (or it was deleted), another error when its record is broken.
+    [[nodiscard]] Result<Entry> find(std::string_view path) const {
         for (const Loaded& l : chain_) {
             std::uint64_t lo = 0, hi = l.commit.index_count;
             while (lo < hi) {
                 const std::uint64_t mid = lo + (hi - lo) / 2;
                 const std::string_view p = path_view(l, mid);
                 if (p == path) {
-                    // Every record was checked at open, so this cannot fail.
                     auto e = entry_at(l, mid, options_.limits);
-                    if (!e || e->deleted()) return std::nullopt;
-                    return std::move(*e);
+                    if (!e) return e;
+                    if (e->deleted()) {
+                        if (l.commit.index_kind == IndexKind::full) return fail(Code::malformed, "a tombstone in a full index", e->path);
+                        return fail(Code::not_found, "deleted", std::string(path));
+                    }
+                    if (auto r = check_run(*e); !r) return std::unexpected(r.error());
+                    return e;
                 }
                 if (p < path) {
                     lo = mid + 1;
@@ -567,11 +586,16 @@ public:
                 }
             }
         }
-        return std::nullopt;
+        return fail(Code::not_found, "no such entry", std::string(path));
     }
 
-    /// Every live entry, sorted by path.
-    [[nodiscard]] const std::vector<Entry>& entries() const noexcept { return live_; }
+    /// Every live entry, sorted by path: the whole state, checked the first
+    /// time it is asked for (§3.5, §4.1, §3.9), then kept.
+    [[nodiscard]] Result<std::span<const Entry>> entries() const {
+        std::call_once(lazy_->live_once, [this] { lazy_->live = load_live(); });
+        if (!lazy_->live) return std::unexpected(lazy_->live.error());
+        return std::span<const Entry>(*lazy_->live);
+    }
 
     /// An entry's content, all of it, verified against its digest before it
     /// is returned (§9.1).
@@ -614,7 +638,11 @@ public:
 
     /// The content digest of the current state, from the live entries
     /// (§9.2): compare with commit().content_digest.
-    [[nodiscard]] Result<Digest> compute_content_digest() const { return content_digest(live_); }
+    [[nodiscard]] Result<Digest> compute_content_digest() const {
+        auto live = entries();
+        if (!live) return std::unexpected(live.error());
+        return content_digest(*live);
+    }
 
     /// A chunked entry's chunks (§4.5), its table checked against its digest.
     [[nodiscard]] Result<std::vector<Chunk>> chunks(const Entry& e) const {
@@ -722,12 +750,13 @@ private:
         }
         if (!current) return fail(Code::malformed, "no superblock names a valid commit (" + why + ")");
 
-        // 3. The chain, newest first, down to a full index (§3.5).
+        // 3. The chain, newest first, down to a full index (§3.5): records,
+        // and their indexes and string tables in place.
         std::optional<Commit> c = current;
         while (true) {
             Loaded l;
             l.commit = *c;
-            if (auto r = load_index(l); !r) return r;
+            if (auto r = map_index(l); !r) return r;
             chain_.push_back(std::move(l));
             if (c->index_kind == IndexKind::full) break;
             auto prev = read_commit(*source_, c->previous, limits);
@@ -738,9 +767,18 @@ private:
             c = *prev;
         }
 
-        // 4. The live entries: the full index, the deltas applied oldest first.
+        // 4. The manifest (§7).
+        return load_manifest();
+    }
+
+    /// The whole state (§3.5): every index sorted and unique, every record
+    /// checked, the deltas applied oldest first, the live count, the case
+    /// collisions (§4.1), the features (§3.9).
+    Result<std::vector<Entry>> load_live() const {
+        const Limits& limits = options_.limits;
         std::map<std::string, Entry, std::less<>> live;
         for (auto it = chain_.rbegin(); it != chain_.rend(); ++it) {
+            if (auto r = check_order(*it); !r) return std::unexpected(r.error());
             for (std::uint64_t i = 0; i < it->commit.index_count; ++i) {
                 auto e = entry_at(*it, i, limits);
                 if (!e) return std::unexpected(e.error());
@@ -748,90 +786,128 @@ private:
                 if (e->deleted()) {
                     live.erase(e->path);
                 } else {
-                    if (auto r = check_run(*e); !r) return r;
+                    if (auto r = check_run(*e); !r) return std::unexpected(r.error());
                     live.insert_or_assign(e->path, std::move(*e));
                 }
             }
         }
-        if (live.size() != current->live_count) {
-            return fail(Code::malformed, std::format("{} live entries, where the commit says {}", live.size(), current->live_count));
+        const Commit& current = commit();
+        if (live.size() != current.live_count) {
+            return fail(Code::malformed, std::format("{} live entries, where the commit says {}", live.size(), current.live_count));
         }
-        live_.reserve(live.size());
-        for (auto& [path, e] : live) live_.push_back(std::move(e));
-
-        // 5. Case collisions among the live entries (§4.1).
+        std::vector<Entry> out;
+        out.reserve(live.size());
+        for (auto& [path, e] : live) out.push_back(std::move(e));
         std::map<std::u32string, std::string_view> keys;
-        for (const Entry& e : live_) {
+        for (const Entry& e : out) {
             auto [it, fresh] = keys.try_emplace(collision_key(e.path), e.path);
             if (!fresh) return fail(Code::path, std::format("collides with \"{}\" on a case-insensitive file system", it->second), e.path);
         }
-
-        // 6. The features the state uses are the ones the commit declares (§3.9).
         std::uint64_t uses = 0;
-        for (const Entry& e : live_) {
+        for (const Entry& e : out) {
             if (e.codec == Codec::zstd_dict) uses |= feature::zstd_dictionaries;
             if (e.codec == Codec::chunked) uses |= feature::chunked;
         }
-        if ((uses & ~current->features & 0x3) != 0) {
-            return fail(Code::malformed, "the state uses a feature its commit does not declare");
-        }
-
-        // 7. The manifest (§7).
-        return load_manifest();
+        if ((uses & ~current.features & 0x3) != 0) return fail(Code::malformed, "the state uses a feature its commit does not declare");
+        return out;
     }
 
-    Result<void> load_index(Loaded& l) {
+    /// A commit's index and string table, in place where the source allows.
+    Result<void> map_index(Loaded& l) const {
         const Commit& c = l.commit;
-        auto index = source_->read(c.index_offset, c.index_count * record_size);
-        if (!index) return std::unexpected(index.error());
-        auto strings = source_->read(c.strings_offset, c.strings_length);
-        if (!strings) return std::unexpected(strings.error());
-        l.index = std::move(*index);
-        l.strings = std::move(*strings);
-        // Sorted by path, byte-wise, each path once (§3.5).
+        const std::uint64_t index_bytes = c.index_count * record_size;
+        if (auto v = source_->view(c.index_offset, index_bytes)) {
+            l.index = *v;
+        } else {
+            auto index = source_->read(c.index_offset, index_bytes);
+            if (!index) return std::unexpected(index.error());
+            l.owned_index = std::move(*index);
+            l.index = l.owned_index;
+        }
+        if (auto v = source_->view(c.strings_offset, c.strings_length)) {
+            l.strings = *v;
+        } else {
+            auto strings = source_->read(c.strings_offset, c.strings_length);
+            if (!strings) return std::unexpected(strings.error());
+            l.owned_strings = std::move(*strings);
+            l.strings = l.owned_strings;
+        }
+        return {};
+    }
+
+    /// Sorted by path, byte-wise, each path once (§3.5).
+    Result<void> check_order(const Loaded& l) const {
         std::string_view last;
-        for (std::uint64_t i = 0; i < c.index_count; ++i) {
+        for (std::uint64_t i = 0; i < l.commit.index_count; ++i) {
             const std::string_view p = path_view(l, i);
-            if (p.empty()) return fail(Code::malformed, std::format("entry {} of commit {} has no readable path", i, c.sequence));
+            if (p.empty()) return fail(Code::malformed, std::format("entry {} of commit {} has no readable path", i, l.commit.sequence));
             if (i > 0 && !(last < p)) {
-                return fail(Code::malformed, std::format("the index of commit {} is not sorted, or names a path twice", c.sequence), std::string(p));
+                return fail(Code::malformed, std::format("the index of commit {} is not sorted, or names a path twice", l.commit.sequence),
+                            std::string(p));
             }
             last = p;
         }
         return {};
     }
 
-    /// A run (or chunk table) lies in data an earlier-or-same commit wrote,
-    /// never in the header, an index, a string table or a record (§3.6).
-    [[nodiscard]] bool run_inside(std::uint64_t offset, std::uint64_t length, std::uint64_t commit_sequence) const {
+    /// Every commit's data and chunk-table regions, from the current one to
+    /// the first, their records read and checked (§3.4). Walked once, when a
+    /// run is first checked.
+    Result<void> walk_regions() const {
+        std::call_once(lazy_->regions_once, [this] {
+            std::vector<CommitRegion> data, chunks;
+            std::optional<Commit> c = commit();
+            std::uint64_t steps = 0;
+            while (c) {
+                if (c->data_length) data.push_back({c->data_offset, c->data_length, c->sequence});
+                if (c->chunks_length) chunks.push_back({c->chunks_offset, c->chunks_length, c->sequence});
+                if (c->previous == 0) break;
+                if (++steps > (std::uint64_t{1} << 32)) break;
+                auto prev = read_commit(*source_, c->previous, options_.limits);
+                if (!prev) {
+                    lazy_->regions_error = prev.error();
+                    return;
+                }
+                if (prev->sequence >= c->sequence) {
+                    lazy_->regions_error = Error{Code::malformed, "a commit whose predecessor does not come before it", std::nullopt};
+                    return;
+                }
+                c = *prev;
+            }
+            lazy_->data_regions = std::move(data);
+            lazy_->chunk_regions = std::move(chunks);
+        });
+        if (lazy_->regions_error) return std::unexpected(*lazy_->regions_error);
+        return {};
+    }
+
+    /// Whether [offset, offset + length) lies wholly inside one region of a
+    /// commit no later than `sequence` (§3.6: a run in data its own commit or
+    /// an earlier one wrote; a chunk table in a chunk-table region).
+    static bool inside(const std::vector<CommitRegion>& regions, std::uint64_t offset, std::uint64_t length, std::uint64_t sequence) {
         if (length == 0) return true;
         const auto end = add(offset, length);
-        if (!end || offset < header_size || *end > source_->size()) return false;
-        for (const Loaded& l : chain_) {
-            const Commit& c = l.commit;
-            const Region forbidden[] = {{c.index_offset, c.index_count * record_size, ""},
-                                        {c.strings_offset, c.strings_length, ""},
-                                        {c.signatures_offset, c.signatures_length, ""},
-                                        {c.offset, commit_size, ""}};
-            for (const Region& f : forbidden) {
-                if (f.length != 0 && offset < f.offset + f.length && f.offset < *end) return false;
-            }
-            // Never after its own commit's record.
-            if (c.sequence == commit_sequence && *end > c.offset) return false;
-        }
-        return true;
+        if (!end) return false;
+        return std::ranges::any_of(regions, [&](const CommitRegion& r) {
+            return r.sequence <= sequence && offset >= r.offset && *end <= r.offset + r.length;
+        });
     }
 
     Result<void> check_run(const Entry& e) const {
-        if (!run_inside(e.offset, e.stored_size, e.commit)) {
-            return fail(Code::malformed, "its run lies outside the data regions", e.path);
-        }
+        if (auto r = walk_regions(); !r) return std::unexpected(Error{r.error().code, r.error().message, e.path});
+        const bool ok = e.codec == Codec::chunked ? inside(lazy_->chunk_regions, e.offset, e.stored_size, e.commit)
+                                                  : inside(lazy_->data_regions, e.offset, e.stored_size, e.commit);
+        if (!ok) return fail(Code::malformed, e.codec == Codec::chunked ? "its chunk table lies outside the chunk-table regions"
+                                                                        : "its run lies outside the data regions", e.path);
         return {};
     }
 
     Result<void> load_manifest() {
         const auto e = find(manifest_path);
-        if (!e) return fail(Code::malformed, "no live SQ-INF/manifest.json");
+        if (!e) {
+            if (e.error().code == Code::not_found) return fail(Code::malformed, "no live SQ-INF/manifest.json");
+            return std::unexpected(e.error());
+        }
         auto bytes = read(*e);
         if (!bytes) return std::unexpected(bytes.error());
         const std::string_view text(reinterpret_cast<const char*>(bytes->data()), bytes->size());
@@ -861,6 +937,7 @@ private:
 
     /// A chunked entry's chunk table, read and checked against its digest.
     Result<std::vector<Chunk>> chunk_table(const Entry& e) const {
+        if (auto r = check_run(e); !r) return std::unexpected(r.error());
         auto table = source_->read(e.offset, e.stored_size);
         if (!table) return std::unexpected(table.error());
         const std::uint64_t n = e.stored_size / chunk_record;
@@ -877,13 +954,14 @@ private:
             std::copy(p + 32, p + 64, c.sha256.begin());
             c.reserved_clear = all_zero(std::span(p + 18, 2)) && all_zero(std::span(p + 24, 8));
             const std::uint64_t want = i + 1 < n ? chunk_size : e.size - (n - 1) * chunk_size;
-            const std::string what = std::format("{} (chunk {})", e.path, i);
             if (c.size != want) return fail(Code::malformed, std::format("chunk {} holds {} bytes, not {}", i, c.size, want), e.path);
             if (codec > 2) return fail(Code::malformed, std::format("chunk {} has codec {}", i, codec), e.path);
             c.codec = static_cast<Codec>(codec);
             if ((c.codec == Codec::zstd_dict) != (c.dictionary != 0)) return fail(Code::malformed, std::format("chunk {}'s dictionary ID does not fit its codec", i), e.path);
             if (c.codec == Codec::stored && c.stored_size != c.size) return fail(Code::malformed, std::format("stored chunk {} is not its size", i), e.path);
-            if (!run_inside(c.offset, c.stored_size, e.commit)) return fail(Code::malformed, std::format("chunk {} lies outside the data regions", i), e.path);
+            if (!inside(lazy_->data_regions, c.offset, c.stored_size, e.commit)) {
+                return fail(Code::malformed, std::format("chunk {} lies outside the data regions", i), e.path);
+            }
             leaves.push_back(c.sha256);
             chunks.push_back(c);
         }
@@ -913,20 +991,23 @@ private:
     /// its own header naming the same ID (§4.3). Kept while open.
     Result<std::shared_ptr<const std::vector<std::byte>>> load_dictionary(std::uint32_t id) const {
         {
-            std::lock_guard lock(dictionaries_->mutex);
-            if (auto it = dictionaries_->loaded.find(id); it != dictionaries_->loaded.end()) return it->second;
+            std::lock_guard lock(lazy_->mutex);
+            if (auto it = lazy_->dictionaries.find(id); it != lazy_->dictionaries.end()) return it->second;
         }
         const std::string path = std::format("{}{}.zdict", dictionary_dir, id);
         const auto e = find(path);
-        if (!e) return fail(Code::malformed, std::format("no dictionary {} ({})", id, path));
+        if (!e) {
+            if (e.error().code == Code::not_found) return fail(Code::malformed, std::format("no dictionary {} ({})", id, path));
+            return std::unexpected(e.error());
+        }
         if (!(e->flags & flag::dictionary)) return fail(Code::malformed, path + " is not flagged as a dictionary");
         if (e->codec == Codec::zstd_dict || e->codec == Codec::chunked) return fail(Code::malformed, path + " is not stored or zstd");
         auto bytes = read(*e);
         if (!bytes) return std::unexpected(bytes.error());
         if (dictionary_id_of(*bytes) != id) return fail(Code::malformed, path + "'s own header names another dictionary ID");
         auto shared = std::make_shared<const std::vector<std::byte>>(std::move(*bytes));
-        std::lock_guard lock(dictionaries_->mutex);
-        dictionaries_->loaded.emplace(id, shared);
+        std::lock_guard lock(lazy_->mutex);
+        lazy_->dictionaries.emplace(id, shared);
         return shared;
     }
 
@@ -957,9 +1038,15 @@ private:
 
     friend CheckReport check_archive(const Archive&, CheckReport);
 
-    struct Dictionaries {
+    /// What is worked out once, on first need, by whichever thread needs it.
+    struct Lazy {
+        std::once_flag live_once;
+        Result<std::vector<Entry>> live = std::vector<Entry>{};
+        std::once_flag regions_once;
+        std::vector<CommitRegion> data_regions, chunk_regions;
+        std::optional<Error> regions_error;
         std::mutex mutex;
-        std::map<std::uint32_t, std::shared_ptr<const std::vector<std::byte>>> loaded;
+        std::map<std::uint32_t, std::shared_ptr<const std::vector<std::byte>>> dictionaries;
     };
 
     std::unique_ptr<Source> source_;
@@ -967,9 +1054,8 @@ private:
     std::vector<std::byte> header_;
     std::array<Slot, 2> slots_;
     std::vector<Loaded> chain_;
-    std::vector<Entry> live_;
     Manifest manifest_;
-    std::unique_ptr<Dictionaries> dictionaries_ = std::make_unique<Dictionaries>();
+    std::unique_ptr<Lazy> lazy_ = std::make_unique<Lazy>();
 };
 
 }  // namespace sq::cart
@@ -1022,14 +1108,20 @@ CheckReport check_archive(const Archive& a, CheckReport r) {
         }
     }
 
-    // Every live entry, read and verified; its metadata looked at.
+    // The whole state (§3.5, §4.1); every live entry, read and verified;
+    // its metadata looked at.
+    auto state = a.entries();
+    if (!state) {
+        error(state.error().code, state.error().message, state.error().entry);
+        return r;
+    }
     struct Run {
         std::uint64_t offset, length;
         std::string owner;
     };
     std::vector<Run> runs;
     std::set<std::uint32_t> dictionaries_used;
-    for (const Entry& e : a.entries()) {
+    for (const Entry& e : *state) {
         ++r.entries_checked;
         if (e.codec == Codec::zstd_dict) dictionaries_used.insert(e.dictionary);
         if (e.codec == Codec::chunked) {
@@ -1067,7 +1159,7 @@ CheckReport check_archive(const Archive& a, CheckReport r) {
             error(Code::json, "a created or updated time beyond ±(2^53 − 1) ms, which the content digest cannot hold", e.path);
         }
     }
-    for (const Entry& e : a.entries()) {
+    for (const Entry& e : *state) {
         if ((e.flags & flag::dictionary) && !e.path.ends_with(".zdict")) continue;
         if (e.flags & flag::dictionary) {
             const std::string_view id = std::string_view(e.path).substr(dictionary_dir.size(), e.path.size() - dictionary_dir.size() - 6);
