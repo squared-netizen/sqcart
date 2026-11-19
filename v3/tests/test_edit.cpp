@@ -296,6 +296,66 @@ int main() {
         check(read_back(p, "b.txt") == bytes("after") && read_back(p, "a.bin") == pattern(200000, 22), "to the compacted file");
         check(checks(p), "check passes");
     }
+    // put_range_file: ranges read from a file at commit, mixed with ranges
+    // in memory and resizes, against a model; a file that changes is refused.
+    {
+        const auto p = scratch("rangefile.sq");
+        auto model = pattern(mib * 3 + 99, 30);
+        start(p, {{"big.bin", model, Store::chunked}, {"small.bin", pattern(5000, 31)}});
+        const auto source = pattern(mib * 2 + 4321, 32);
+        const auto src = scratch("ranges.input");
+        std::ofstream(src, std::ios::binary).write(reinterpret_cast<const char*>(source.data()), static_cast<std::streamsize>(source.size()));
+        {
+            auto w = Writer::open(p, quick_options());
+            check(w->put_range_file("big.bin", 10, src, 0, mib + 7).has_value(), "a range from a file, across chunks");
+            std::copy_n(source.begin(), mib + 7, model.begin() + 10);
+            check(w->put_range("big.bin", 500, bytes("in memory")).has_value(), "a range in memory over it");
+            std::ranges::copy(bytes("in memory"), model.begin() + 500);
+            check(w->put_range_file("big.bin", 3 * mib + 50, src, 1000, mib).has_value(), "a range from the middle of the file, past the end");
+            model.resize(4 * mib + 50);
+            std::copy_n(source.begin() + 1000, mib, model.begin() + static_cast<std::ptrdiff_t>(3 * mib + 50));
+            check(w->size("big.bin").value() == model.size(), "size() counts it");
+            check(!w->put_range_file("big.bin", 0, src, mib * 2, mib), "a range past the file's end is refused at once");
+            check(w->put_range_file("small.bin", 100, src, 7, 300).has_value(), "on an entry that is not chunked");
+            auto c = w->commit();
+            check(c.has_value(), c ? "commit" : c.error().message);
+        }
+        check(read_back(p, "big.bin") == model, "the entry is the model");
+        auto small = pattern(5000, 31);
+        std::copy_n(source.begin() + 7, 300, small.begin() + 100);
+        check(read_back(p, "small.bin") == small, "and the small one");
+        check(checks(p), "check passes");
+        {
+            auto w = Writer::open(p, quick_options());
+            check(w->put_range_file("big.bin", 0, src, 0, mib).has_value(), "stage a range");
+            std::filesystem::resize_file(src, 100);  // the file changes before the commit
+            auto c = w->commit();
+            check(!c && c.error().code == Code::io, "a file shorter at commit than when staged is refused");
+            w->discard();
+        }
+        check(read_back(p, "big.bin") == model && checks(p), "and nothing changed");
+    }
+
+    // The writer: colliding paths only under a case_sensitive manifest.
+    {
+        const auto p = scratch("case.sq");
+        std::filesystem::remove(p);
+        auto w = Writer::create(p, quick_options());
+        static_cast<void>(w->put("SQ-INF/manifest.json", manifest()));
+        static_cast<void>(w->put("xt_MARK.h", bytes("target")));
+        static_cast<void>(w->put("xt_mark.h", bytes("match")));
+        auto refused = w->commit();
+        check(!refused && refused.error().code == Code::path, "colliding paths are refused by default");
+        static_cast<void>(w->put("SQ-INF/manifest.json",
+                                 bytes(R"({"case_sensitive":true,"format":"squared-cartridge","format_version":3,"id":"t","kind":"package","version":"1"})")));
+        auto c = w->commit();
+        check(c.has_value(), c ? "and committed under case_sensitive" : c.error().message);
+        static_cast<void>(w->put("XT_MARK.h", bytes("a third")));
+        check(w->commit().has_value(), "a later commit keeps to the committed manifest");
+        check(read_back(p, "xt_mark.h") == bytes("match") && read_back(p, "XT_MARK.h") == bytes("a third"), "each reads as itself");
+        check(checks(p), "check passes");
+    }
+
     // set_commit_time: the next commit records it.
     {
         const auto p = scratch("time.sq");
