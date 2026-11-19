@@ -1183,8 +1183,13 @@ size is 64 × ⌈size / 2^20⌉.
    them through sqcart's reader instead of tar and zstd, and a package
    gains per-file metadata and, when it is signed, a signature (§9.3).
    Nothing in this format changes for it; the move is sqterm's (its
-   packages' build, pkg, the app's first start). A package is no longer a
-   tarball a person opens with `tar`: `sqcart3 unpack` opens it.
+   packages' build, pkg, the app's first start). The symbolic links a
+   package installs are sqterm's data, listed in its manifest's
+   `consumers.sqterm.links` (path to target) for pkg to make: a cartridge
+   still holds no link, and unpack (§6.1) still makes none. A package is
+   no longer a tarball a person opens with `tar`: `sqcart3 unpack` opens
+   it. The release carries both forms while the pkg already installed
+   reads only tarballs.
 3. **One extension, `.sq`**, for every kind (§7): one name to recognise,
    one media type to register, and no extension that can disagree with
    the manifest it names.
