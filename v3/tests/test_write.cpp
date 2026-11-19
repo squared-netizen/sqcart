@@ -214,7 +214,7 @@ int main() {
         }
         auto a = Archive::open(p);
         check(a && a->commit().sequence == 4 && a->commit().index_kind == IndexKind::full, "the fourth commit is full again");
-        check(a && a->entries().size() == 4, "and holds every entry");
+        check(a && a->entries()->size() == 4, "and holds every entry");
     }
 
     // A torn current slot: the writer continues from the commit the reader

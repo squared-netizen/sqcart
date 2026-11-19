@@ -104,7 +104,9 @@ int read_commands(std::string_view cmd, const std::vector<std::string_view>& arg
         return 0;
     }
     if (cmd == "ls" && args.size() == 2) {
-        for (const Entry& e : cart->entries()) {
+        auto live = cart->entries();
+        if (!live) return fail(live.error());
+        for (const Entry& e : *live) {
             std::println("{} {:>12} {:<9} {}{}", letters(e.flags), e.size, codec(e.codec), e.path, e.title ? "  \"" + *e.title + "\"" : "");
         }
         return 0;

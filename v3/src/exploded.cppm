@@ -136,7 +136,9 @@ struct UnpackOptions {
 /// Windows cannot create. Never follows a link; never makes a file
 /// executable (2.0 §3.1, kept).
 [[nodiscard]] Result<std::size_t> unpack(const Archive& cart, const std::filesystem::path& target, UnpackOptions options = {}) {
-    for (const Entry& e : cart.entries()) {
+    auto live = cart.entries();
+    if (!live) return std::unexpected(live.error());
+    for (const Entry& e : *live) {
         for (std::size_t from = 0; from <= e.path.size();) {
             std::size_t slash = e.path.find('/', from);
             if (slash == std::string::npos) slash = e.path.size();
@@ -156,7 +158,7 @@ struct UnpackOptions {
     }
     data::JsonValue::Object metadata;
     std::size_t written = 0;
-    for (const Entry& e : cart.entries()) {
+    for (const Entry& e : *live) {
         auto bytes = cart.read(e);
         if (!bytes) return std::unexpected(bytes.error());
         const std::size_t slash = e.path.rfind('/');

@@ -16,6 +16,15 @@ bool has(const CheckReport& r, Finding::Severity s, std::string_view words) {
     return std::ranges::any_of(r.findings, [&](const Finding& f) { return f.severity == s && f.message.find(words) != std::string::npos; });
 }
 
+/// Refused by the reader: at open, or when its whole state is asked for
+/// (entries(), §12), with `code` (or any code, when none is given).
+bool refused(const std::vector<std::byte>& file, std::optional<Code> code = std::nullopt) {
+    auto a = Archive::open_memory(file);
+    if (!a) return !code || a.error().code == *code;
+    auto live = a->entries();
+    return !live && (!code || live.error().code == *code);
+}
+
 std::vector<std::byte> quick() {
     std::string t;
     for (int i = 0; i < 40; ++i) t += "The quick brown fox jumps over the lazy dog. ";
@@ -95,7 +104,7 @@ int main() {
     }
     // R10: two entries partly over the same bytes.
     {
-        auto b = simple({{.path = "a", .content = bytes("0123456789")}});
+        auto b = simple({{.path = "a", .content = bytes("0123456789abcdefgh")}});
         const std::uint64_t run = b.runs["a"];
         b.commit({{.path = "b", .content = bytes("23456789xy"), .reuse_run = run + 2}}, {.full = false});
         const auto r = check_memory(b.file());
@@ -112,16 +121,17 @@ int main() {
     // R12 / §4.1: paths.
     for (const char* bad : {"../escape", "/abs", "a//b", "a/./b", "a\\b", "c:x", "tab\there", "cafe\u0301.txt"}) {
         auto b = simple({{.path = bad, .content = bytes("x")}});
-        auto r = Archive::open_memory(b.file());
-        check(!r && r.error().code == Code::path, std::format("R12: the path \"{}\" is refused", bad));
+        check(refused(b.file(), Code::path), std::format("R12: the path \"{}\" is refused", bad));
+        auto a = Archive::open_memory(b.file());
+        auto e = a ? a->find(bad) : std::unexpected(Error{});
+        check(!e && e.error().code == Code::path, std::format("R12: and find(\"{}\") refuses its record", bad));
     }
     // R13: paths that collide on a case-insensitive file system.
     {
         auto b = simple({{.path = "Readme.md", .content = bytes("1")}, {.path = "README.md", .content = bytes("2")}});
-        auto r = Archive::open_memory(b.file());
-        check(!r && r.error().code == Code::path, "R13: README.md and Readme.md collide");
+        check(refused(b.file(), Code::path), "R13: README.md and Readme.md collide");
         auto s = simple({{.path = "straße", .content = bytes("1")}, {.path = "STRASSE", .content = bytes("2")}});
-        check(!Archive::open_memory(s.file()), "R13: straße and STRASSE collide");
+        check(refused(s.file(), Code::path), "R13: straße and STRASSE collide");
     }
     // R19: a manifest that is not I-JSON.
     {
@@ -179,7 +189,7 @@ int main() {
                           {.edit_entry = [](const std::string& path, std::span<std::byte, 128> r) {
                                if (path == "font.ttf") r[32] = std::byte{64};  // offset 16384 + 64
                            }});
-        check(!Archive::open_memory(mis.file()), "a mappable entry off a 16384 boundary is refused");
+        check(refused(mis.file()), "a mappable entry off a 16384 boundary is refused");
     }
     // §7: no manifest, a live count that lies.
     {
@@ -187,7 +197,7 @@ int main() {
         b.commit({{.path = "a", .content = bytes("x")}});
         check(!Archive::open_memory(b.file()), "no manifest: refused");
         auto lie = simple({}, {.live_count = 7});
-        check(!Archive::open_memory(lie.file()), "a live count that lies: refused");
+        check(refused(lie.file()), "a live count that lies: refused");
     }
     return report("redteam");
 }

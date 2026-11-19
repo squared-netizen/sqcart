@@ -68,7 +68,7 @@ int main() {
     auto a = Archive::open(cart);
     check(a.has_value(), "the packed cartridge opens");
     if (!a) return report("exploded");
-    check(a->entries().size() == 4, "manifest, README, tile, settlement: four entries");
+    check(a->entries()->size() == 4, "manifest, README, tile, settlement: four entries");
     check(!a->find(".squared/journal") && !a->find(".git/HEAD"), ".squared/ and .git/ are never entries");
     check(!a->find("SQ-INF/entries.json"), "entries.json is not an entry");
     check(a->find("README.md")->title == "Read me", "a title from entries.json");
