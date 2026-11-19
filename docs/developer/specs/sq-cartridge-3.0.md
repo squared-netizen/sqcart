@@ -934,6 +934,9 @@ expects of sqcart:
   change to a big file costs a small commit.
 - **Coalescing**: an entry or chunk changed many times before a commit
   is written once.
+- **Renames and cuts** write records, not content: a renamed entry's new
+  record names the same runs, and a cut chunked entry names again every
+  chunk below the cut (§3.6).
 - **Commits** are sqcart commits (§10.3), triggered by the application's
   own choice: on request, at a loading screen, past a staging-size or
   time budget, at a clean shutdown.

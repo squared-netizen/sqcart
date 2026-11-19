@@ -19,6 +19,8 @@ enum class Code : std::uint8_t {
     json,         ///< JSON that is not I-JSON (§5)
     integrity,    ///< a digest does not match
     not_found,    ///< no such entry
+    busy,         ///< another writer holds the cartridge's lock (§10.2)
+    conflict,     ///< the cartridge is not the state a caller built on (a Drive's journal, say)
 };
 
 [[nodiscard]] constexpr std::string_view to_string(Code code) noexcept {
@@ -31,6 +33,8 @@ enum class Code : std::uint8_t {
         case Code::json: return "json";
         case Code::integrity: return "integrity";
         case Code::not_found: return "not_found";
+        case Code::busy: return "busy";
+        case Code::conflict: return "conflict";
     }
     return "unknown";
 }

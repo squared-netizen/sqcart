@@ -11,6 +11,8 @@
 //   sqcart3 new FILE MANIFEST          a new cartridge, its manifest from a file
 //   sqcart3 put FILE PATH SOURCE       an entry from a file (- for stdin), committed
 //   sqcart3 rm FILE PATH               an entry removed, committed
+//   sqcart3 mv FILE FROM TO            an entry renamed, its content not copied (§3.6), committed
+//   sqcart3 truncate FILE PATH SIZE    an entry cut or grown with zeros, committed
 //   sqcart3 compact FILE               one commit, its live entries only (§10.4)
 //   sqcart3 pack DIR FILE [--drop-orphans]  an exploded cartridge packed, as one commit
 //   sqcart3 keygen KEYFILE             an Ed25519 signing key (a 32-byte seed, in hex, mode 0600)
@@ -41,6 +43,8 @@ int usage() {
                             "       sqcart3 new FILE MANIFEST [options]\n"
                             "       sqcart3 put FILE PATH SOURCE [options]\n"
                             "       sqcart3 rm FILE PATH [options]\n"
+                            "       sqcart3 mv FILE FROM TO [options]\n"
+                            "       sqcart3 truncate FILE PATH SIZE [options]\n"
                             "       sqcart3 compact FILE\n"
                             "       sqcart3 pack DIR FILE [--drop-orphans] [--sign KEYFILE --signer NAME]\n"
                             "       sqcart3 keygen KEYFILE\n"
@@ -262,8 +266,9 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
         std::println("{}: packed into {}, {} entries{}", file.string(), args[2], c->live_count, c->signatures_length ? ", signed" : "");
         return 0;
     }
-    const std::size_t positional = cmd == "put" ? 4 : 3;
-    if ((cmd != "new" && cmd != "put" && cmd != "rm") || args.size() < positional) return usage();
+    const bool four = cmd == "put" || cmd == "mv" || cmd == "truncate";
+    const std::size_t positional = four ? 4 : 3;
+    if ((cmd != "new" && cmd != "put" && cmd != "rm" && !four) || args.size() < positional) return usage();
     const auto o = parse_options(std::span(args).subspan(positional));
     if (!o) return usage();
     WriteOptions wo;
@@ -279,10 +284,20 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
         auto manifest = slurp(args[2]);
         if (!manifest) return fail("cannot read " + std::string(args[2]));
         if (auto r = w->put("SQ-INF/manifest.json", *manifest, {.media_type = "application/json"}); !r) return fail(r.error());
+    } else if (cmd == "put" && args[3] != "-") {
+        // From a file: read at commit, 1 MiB at a time past 64 MiB.
+        if (auto r = w->put_file(std::string(args[2]), std::filesystem::path(args[3]), o->put); !r) return fail(r.error());
     } else if (cmd == "put") {
         auto content = slurp(args[3]);
         if (!content) return fail("cannot read " + std::string(args[3]));
         if (auto r = w->put(std::string(args[2]), *content, o->put); !r) return fail(r.error());
+    } else if (cmd == "mv") {
+        if (auto r = w->rename(args[2], std::string(args[3])); !r) return fail(r.error());
+    } else if (cmd == "truncate") {
+        std::uint64_t size = 0;
+        const auto t = args[3];
+        if (std::from_chars(t.data(), t.data() + t.size(), size).ec != std::errc{}) return usage();
+        if (auto r = w->resize(args[2], size); !r) return fail(r.error());
     } else {
         if (auto r = w->remove(args[2]); !r) return fail(r.error());
     }

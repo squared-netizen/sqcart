@@ -3,17 +3,18 @@
 // sq.cart.write — the 3.0 writer (docs/developer/specs/sq-cartridge-3.0.md
 // §10): sqcart is the only thing that writes cartridge bytes, and this is
 // it. A Writer holds the lock (<file>.lock, §10.2), stages puts, removals,
-// metadata changes and ranges of chunked entries, and commits them (§10.3):
-// append, flush, write the spare slot, flush. compact() rewrites a
-// cartridge as one commit (§10.4).
+// renames, metadata changes, and ranges and resizes of entries, and commits
+// them (§10.3): append, flush, write the spare slot, flush. compact()
+// rewrites a cartridge as one commit (§10.4).
 //
 // Its own module, apart from sq.cart, so a program that only reads carries
 // no compressor: this one links zstd's whole library (../third_party/zstd-
 // 1.5.7/zstd.c) where a reader links its decoder alone.
 //
-// Staging is in memory: what a commit writes is held until commit(). The
-// Virtual Cartridge Drive, a tool of its own, is what stages large changes
-// on disk and decides when to commit (§10.5).
+// Staging is in memory (put_file aside, read at commit): what a commit
+// writes is held until commit(). The Virtual Cartridge Drive (sqdrive), a
+// tool of its own, is what stages large changes on disk and decides when
+// to commit (§10.5).
 
 module;
 
@@ -155,7 +156,7 @@ public:
             const int why = errno;
             ::close(fd);
             if (why == EWOULDBLOCK) {
-                return fail(Code::io, std::format("{} is being written by another process ({} is locked)", cartridge.string(), path.string()));
+                return fail(Code::busy, std::format("{} is being written by another process ({} is locked)", cartridge.string(), path.string()));
             }
             if (why != EINVAL && why != ENOSYS && why != EOPNOTSUPP && why != ENOLCK) {
                 return fail(Code::io, std::format("cannot lock {}: {}", path.string(), std::strerror(why)));
@@ -181,11 +182,11 @@ public:
             const std::string held{std::istreambuf_iterator<char>(in), {}};
             const auto holder = Holder::parse(held);
             if (holder && holder->host != me.host) {
-                return fail(Code::io, std::format("{} is held by a process on {} ({}): only that host can say it is gone", cartridge.string(),
+                return fail(Code::busy, std::format("{} is held by a process on {} ({}): only that host can say it is gone", cartridge.string(),
                                                   holder->host, owner.string()));
             }
             if (holder && holder->alive_here()) {
-                return fail(Code::io, std::format("{} is being written by process {} ({})", cartridge.string(), holder->pid, owner.string()));
+                return fail(Code::busy, std::format("{} is being written by process {} ({})", cartridge.string(), holder->pid, owner.string()));
             }
             // A holder gone from this host (or a lock never finished): take it over, once.
             if (attempt == 0) ::unlink(owner.c_str());
@@ -457,45 +458,155 @@ public:
         return {};
     }
 
+    /// Put an entry from a file, read at commit in 1 MiB pieces: chunked
+    /// past 64 MiB (or with Store::chunked) without ever holding it whole.
+    /// The file must stay as it is until the commit.
+    Result<void> put_file(std::string path, std::filesystem::path file, PutOptions options = {}) {
+        if (auto problem = path_problem(path, options_.limits.max_path_bytes)) return fail(Code::path, *problem, path);
+        if (auto r = check_metadata(path, options); !r) return r;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(file, ec)) return fail(Code::io, file.string() + " is not a regular file", path);
+        Staged s;
+        s.kind = Staged::Kind::put;
+        s.file = std::move(file);
+        s.options = std::move(options);
+        staged_.insert_or_assign(std::move(path), std::move(s));
+        return {};
+    }
+
     /// Remove an entry (a tombstone, §3.5).
     Result<void> remove(std::string_view path) {
-        if (!live_.contains(path) && !staged_.contains(path)) return fail(Code::not_found, "no such entry", std::string(path));
+        if (!exists(path)) return fail(Code::not_found, "no such entry", std::string(path));
         Staged s;
         s.kind = live_.contains(path) ? Staged::Kind::remove : Staged::Kind::forget;
         staged_.insert_or_assign(std::string(path), std::move(s));
         return {};
     }
 
-    /// Change an entry's metadata only: its content, wherever it is, is not
-    /// written again (§3.6). store is ignored.
-    Result<void> set_metadata(std::string_view path, PutOptions options) {
-        auto it = live_.find(path);
-        if (it == live_.end()) return fail(Code::not_found, "no such entry (stage its content with put)", std::string(path));
-        if (auto r = check_metadata(path, options); !r) return r;
-        Staged s;
-        s.kind = Staged::Kind::metadata;
-        s.options = std::move(options);
-        staged_.insert_or_assign(std::string(path), std::move(s));
+    /// Give an entry a new path, replacing any entry there. Its content is
+    /// not written again: the new record names the same runs (§3.6), and
+    /// what is staged for it moves with it.
+    Result<void> rename(std::string_view from_path, std::string to) {
+        const std::string from(from_path);
+        if (from == to) return exists(from) ? Result<void>{} : fail(Code::not_found, "no such entry", from);
+        if (auto problem = path_problem(to, options_.limits.max_path_bytes)) return fail(Code::path, *problem, to);
+        for (const std::string& p : {from, to}) {
+            if (p == "SQ-INF/manifest.json" || p.starts_with("SQ-INF/dictionaries/")) {
+                return fail(Code::path, "the manifest and dictionaries keep their paths (§4.1, §4.3)", p);
+            }
+        }
+        Staged moved;
+        if (auto it = staged_.find(from); it != staged_.end()) {
+            if (it->second.kind == Staged::Kind::remove || it->second.kind == Staged::Kind::forget) {
+                return fail(Code::not_found, "no such entry", from);
+            }
+            moved = std::move(it->second);
+        } else if (live_.contains(from)) {
+            moved.kind = Staged::Kind::edit;
+            moved.source = from;
+        } else {
+            return fail(Code::not_found, "no such entry", from);
+        }
+        Staged gone;
+        gone.kind = live_.contains(from) ? Staged::Kind::remove : Staged::Kind::forget;
+        staged_.insert_or_assign(from, std::move(gone));
+        staged_.insert_or_assign(std::move(to), std::move(moved));
         return {};
     }
 
-    /// Write bytes into a chunked entry at `offset`, growing it if they run
-    /// past its end (§4.5): only the chunks they touch are written again.
-    Result<void> put_range(std::string_view path, std::uint64_t offset, std::span<const std::byte> bytes) {
-        auto it = live_.find(path);
-        if (it == live_.end() || it->second.codec != Codec::chunked) {
-            return fail(Code::not_found, "put_range needs a live chunked entry", std::string(path));
+    /// Change an entry's metadata only: its content, wherever it is, is not
+    /// written again (§3.6). store and dictionary are ignored: an entry put
+    /// in this commit keeps the ones it was put with.
+    Result<void> set_metadata(std::string_view path, PutOptions options) {
+        if (auto r = check_metadata(path, options); !r) return r;
+        if (auto it = staged_.find(path); it != staged_.end()) {
+            Staged& s = it->second;
+            if (s.kind == Staged::Kind::put) {
+                options.store = s.options.store;
+                options.dictionary = s.options.dictionary;
+                s.options = std::move(options);
+                return {};
+            }
+            if (s.kind == Staged::Kind::edit) {
+                s.options = std::move(options);
+                s.metadata = true;
+                return {};
+            }
+            return fail(Code::not_found, "no such entry", std::string(path));
         }
-        if (staged_.contains(path)) return fail(Code::malformed, "commit the entry's other staged change first", std::string(path));
-        const auto end = std::max(it->second.size, offset + bytes.size());
-        if (end > options_.limits.max_entry_size) return fail(Code::limit, "the entry would grow past the size limit", std::string(path));
+        if (!live_.contains(path)) return fail(Code::not_found, "no such entry (stage its content with put)", std::string(path));
         Staged s;
-        s.kind = Staged::Kind::range;
-        s.range_offset = offset;
-        s.content.assign(bytes.begin(), bytes.end());
+        s.kind = Staged::Kind::edit;
+        s.source = std::string(path);
+        s.options = std::move(options);
+        s.metadata = true;
         staged_.emplace(std::string(path), std::move(s));
         return {};
     }
+
+    /// Write bytes into an entry at `offset`, growing it if they run past
+    /// its end, gaps reading as zeros. On a chunked entry (§4.5) only the
+    /// chunks the ranges touch are written again; any number of ranges and
+    /// resizes may be staged for one entry, and apply in the order given.
+    /// An entry put in this commit (not with put_file) takes them at once.
+    Result<void> put_range(std::string_view path, std::uint64_t offset, std::span<const std::byte> bytes) {
+        auto s = editable(path, "put_range");
+        if (!s) return std::unexpected(s.error());
+        if (offset > options_.limits.max_entry_size || bytes.size() > options_.limits.max_entry_size - offset) {
+            return fail(Code::limit, "the entry would grow past the size limit", std::string(path));
+        }
+        if ((*s)->kind == Staged::Kind::put) {
+            auto& c = (*s)->content;
+            if (offset + bytes.size() > c.size()) c.resize(static_cast<std::size_t>(offset + bytes.size()));
+            std::ranges::copy(bytes, c.begin() + static_cast<std::ptrdiff_t>(offset));
+            return {};
+        }
+        Staged::Op op;
+        op.kind = Staged::Op::Kind::write;
+        op.offset = offset;
+        op.bytes.assign(bytes.begin(), bytes.end());
+        (*s)->ops.push_back(std::move(op));
+        return {};
+    }
+
+    /// Make an entry `size` bytes long: cut, or grown with zeros. A chunked
+    /// entry keeps every chunk below the cut as it is; any other entry is
+    /// read and put again (it is at most 64 MiB).
+    Result<void> resize(std::string_view path, std::uint64_t size) {
+        if (size > options_.limits.max_entry_size) return fail(Code::limit, "past the entry size limit", std::string(path));
+        auto s = editable(path, "resize");
+        if (!s) return std::unexpected(s.error());
+        if ((*s)->kind == Staged::Kind::put) {
+            (*s)->content.resize(static_cast<std::size_t>(size));
+            return {};
+        }
+        Staged::Op op;
+        op.kind = Staged::Op::Kind::resize;
+        op.offset = size;
+        (*s)->ops.push_back(std::move(op));
+        return {};
+    }
+
+    /// The size an entry will have once what is staged is committed.
+    [[nodiscard]] Result<std::uint64_t> size(std::string_view path) const {
+        if (auto it = staged_.find(path); it != staged_.end()) {
+            const Staged& s = it->second;
+            if (s.kind == Staged::Kind::remove || s.kind == Staged::Kind::forget) return fail(Code::not_found, "no such entry", std::string(path));
+            if (s.kind == Staged::Kind::put) {
+                if (!s.file) return std::uint64_t{s.content.size()};
+                std::error_code ec;
+                const auto n = std::filesystem::file_size(*s.file, ec);
+                if (ec) return fail(Code::io, std::format("cannot read {}: {}", s.file->string(), ec.message()), std::string(path));
+                return std::uint64_t{n};
+            }
+            return s.size_after(live_.at(s.source).size);
+        }
+        if (auto it = live_.find(path); it != live_.end()) return it->second.size;
+        return fail(Code::not_found, "no such entry", std::string(path));
+    }
+
+    /// Drop everything staged, as if none of it had been asked for.
+    void discard() noexcept { staged_.clear(); }
 
     /// Train a zstd dictionary on `samples` (many small, similar entries:
     /// JSON records, a manual's pages) and stage it as
@@ -550,16 +661,105 @@ public:
     /// Commit what is staged (§10.3). Returns the new commit.
     Result<Commit> commit();
 
+    /// Compact the cartridge (§10.4) under the lock this writer holds, and
+    /// carry on writing to the compacted file. Nothing may be staged.
+    Result<Commit> compact();
+
     Writer(Writer&&) noexcept = default;
     Writer& operator=(Writer&&) noexcept = default;
 
 private:
+    /// What one path will be after the commit.
     struct Staged {
-        enum class Kind : std::uint8_t { put, remove, forget, metadata, range } kind = Kind::put;
+        /// A write or a resize of an edited chunked entry, in the order asked.
+        struct Op {
+            enum class Kind : std::uint8_t { write, resize } kind = Kind::write;
+            std::uint64_t offset = 0;  ///< where a write goes; a resize's new size
+            std::vector<std::byte> bytes;
+        };
+        /// put: new content (`content`, or `file` read at commit) and `options`.
+        /// remove: a tombstone. forget: nothing (it was never committed).
+        /// edit: the live entry `source`, renamed to this path, its metadata
+        /// replaced by `options` when `metadata`, and `ops` applied.
+        enum class Kind : std::uint8_t { put, remove, forget, edit } kind = Kind::put;
         std::vector<std::byte> content;
+        std::optional<std::filesystem::path> file;
         PutOptions options;
-        std::uint64_t range_offset = 0;
+        bool metadata = false;
+        std::string source;
+        std::vector<Op> ops;
+
+        /// The size after `ops`, from `base`.
+        [[nodiscard]] std::uint64_t size_after(std::uint64_t base) const noexcept {
+            for (const Op& op : ops) base = op.kind == Op::Kind::resize ? op.offset : std::max(base, op.offset + op.bytes.size());
+            return base;
+        }
     };
+
+    Result<void> apply_ops(const Archive& before, const Entry& base, std::span<const Staged::Op> ops, std::span<const Chunk> old,
+                           Entry& e, std::vector<Chunk>& out);
+    Result<std::vector<Chunk>> put_streamed(const std::filesystem::path& source, Entry& e);
+
+    /// Whether `path` is an entry once what is staged is committed.
+    [[nodiscard]] bool exists(std::string_view path) const {
+        if (auto it = staged_.find(path); it != staged_.end()) {
+            return it->second.kind != Staged::Kind::remove && it->second.kind != Staged::Kind::forget;
+        }
+        return live_.contains(path);
+    }
+
+    /// An entry's metadata as PutOptions, to put it again as it was.
+    static PutOptions options_of(const Entry& e) {
+        PutOptions o;
+        o.title = e.title, o.author = e.author, o.media_type = e.media_type, o.attributes = e.attributes;
+        o.created = e.created, o.updated = e.updated;
+        o.flags = e.flags & (flag::r | flag::w | flag::x | flag::mappable | flag::dictionary);
+        o.store = (e.flags & flag::mappable) ? Store::stored : Store::automatic;
+        o.dictionary = e.codec == Codec::zstd_dict ? e.dictionary : 0;
+        return o;
+    }
+
+    /// The staged change that ranges and resizes of `path` go to: an edit
+    /// of a chunked entry, or a put whose content is in memory. An entry
+    /// that is not chunked is read and staged as a put of its content.
+    Result<Staged*> editable(std::string_view path, std::string_view what) {
+        auto it = staged_.find(path);
+        if (it == staged_.end()) {
+            if (!live_.contains(path)) return fail(Code::not_found, "no such entry", std::string(path));
+            Staged s;
+            s.kind = Staged::Kind::edit;
+            s.source = std::string(path);
+            it = staged_.emplace(std::string(path), std::move(s)).first;
+        }
+        Staged& s = it->second;
+        if (s.kind == Staged::Kind::remove || s.kind == Staged::Kind::forget) return fail(Code::not_found, "no such entry", std::string(path));
+        if (s.kind == Staged::Kind::put) {
+            if (s.file) return fail(Code::malformed, std::format("{} of an entry put from a file: commit it first", what), std::string(path));
+            return &s;
+        }
+        const Entry& base = live_.at(s.source);
+        if (base.codec == Codec::chunked) return &s;
+        // Not chunked: at most 64 MiB, so read it, and put it again.
+        auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
+        if (!a) return std::unexpected(a.error());
+        auto bytes = a->read(base);
+        if (!bytes) return std::unexpected(bytes.error());
+        Staged put;
+        put.kind = Staged::Kind::put;
+        put.content = std::move(*bytes);
+        put.options = s.metadata ? s.options : options_of(base);
+        if (s.metadata) put.options.dictionary = options_of(base).dictionary;
+        for (const Staged::Op& op : s.ops) {
+            if (op.kind == Staged::Op::Kind::resize) {
+                put.content.resize(static_cast<std::size_t>(op.offset));
+            } else {
+                if (op.offset + op.bytes.size() > put.content.size()) put.content.resize(static_cast<std::size_t>(op.offset + op.bytes.size()));
+                std::ranges::copy(op.bytes, put.content.begin() + static_cast<std::ptrdiff_t>(op.offset));
+            }
+        }
+        s = std::move(put);
+        return &s;
+    }
 
     Writer(Lock lock, Appender file, WriteOptions options)
         : lock_(std::move(lock)), file_(std::move(file)), options_(std::move(options)) {}
@@ -616,7 +816,6 @@ private:
     Commit current_{};
     bool has_commit_ = false;
 
-    friend Result<void> compact(const std::filesystem::path&, WriteOptions);
 };
 
 struct PackOptions {
@@ -934,6 +1133,99 @@ Result<Chunk> write_chunk(Appender& file, std::span<const std::byte> piece, cons
     return c;
 }
 
+/// A chunked entry after its staged ops (§4.5): each chunk no write
+/// touches, and no cut reaches, is named again; the rest are rebuilt from
+/// the old bytes (verified) with the ops applied in order, and written.
+/// A size of 0 leaves an empty stored entry.
+Result<void> Writer::apply_ops(const Archive& before, const Entry& base, std::span<const Staged::Op> ops, std::span<const Chunk> old,
+                               Entry& e, std::vector<Chunk>& out) {
+    using Op = Staged::Op;
+    std::uint64_t size = base.size, floor = base.size;  // floor: the lowest any cut reached
+    for (const Op& op : ops) {
+        if (op.kind == Op::Kind::resize) {
+            size = op.offset;
+            floor = std::min(floor, size);
+        } else {
+            size = std::max(size, op.offset + op.bytes.size());
+        }
+    }
+    out.clear();
+    e.size = size;
+    e.dictionary = 0;
+    if (size == 0) {
+        e.codec = Codec::stored, e.offset = 0, e.stored_size = 0;
+        e.digest = tree_hash(std::span<const std::byte>{});
+        return {};
+    }
+    std::vector<Digest> leaves;
+    for (std::uint64_t i = 0, n = (size + chunk_size - 1) / chunk_size; i < n; ++i) {
+        const std::uint64_t lo = i * chunk_size, hi = std::min(size, lo + chunk_size);
+        const bool had = i < old.size();
+        bool touched = !had || old[i].size != hi - lo || floor < lo + old[i].size;
+        for (const Op& op : ops) {
+            if (op.kind == Op::Kind::write && op.offset < hi && op.offset + op.bytes.size() > lo) touched = true;
+        }
+        if (!touched) {
+            out.push_back(old[i]);
+            leaves.push_back(old[i].sha256);
+            continue;
+        }
+        std::vector<std::byte> piece(static_cast<std::size_t>(hi - lo));
+        if (const std::uint64_t keep = std::min({base.size, floor, hi}); lo < keep) {
+            auto bytes = before.read_range(base, lo, keep - lo);
+            if (!bytes) return std::unexpected(bytes.error());
+            std::ranges::copy(*bytes, piece.begin());
+        }
+        for (const Op& op : ops) {
+            if (op.kind == Op::Kind::resize) {
+                if (op.offset < hi) std::fill(piece.begin() + static_cast<std::ptrdiff_t>(std::max(lo, op.offset) - lo), piece.end(), std::byte{0});
+                continue;
+            }
+            const std::uint64_t from = std::max(lo, op.offset), to = std::min(hi, op.offset + op.bytes.size());
+            if (from < to) {
+                std::copy(op.bytes.begin() + static_cast<std::ptrdiff_t>(from - op.offset), op.bytes.begin() + static_cast<std::ptrdiff_t>(to - op.offset),
+                          piece.begin() + static_cast<std::ptrdiff_t>(from - lo));
+            }
+        }
+        auto c = write_chunk(file_, piece, options_);
+        if (!c) return std::unexpected(c.error());
+        out.push_back(*c);
+        leaves.push_back(c->sha256);
+    }
+    e.codec = Codec::chunked;
+    e.digest = size <= chunk_size ? leaves.front() : tree_hash_from_leaves(leaves, size);
+    return {};
+}
+
+/// A chunked entry read from a file 1 MiB at a time, never held whole.
+Result<std::vector<Chunk>> Writer::put_streamed(const std::filesystem::path& source, Entry& e) {
+    std::ifstream in(source, std::ios::binary);
+    if (!in) return fail(Code::io, "cannot open " + source.string());
+    std::vector<std::byte> piece(chunk_size);
+    std::vector<Chunk> list;
+    std::vector<Digest> leaves;
+    std::uint64_t size = 0;
+    for (;;) {
+        in.read(reinterpret_cast<char*>(piece.data()), static_cast<std::streamsize>(piece.size()));
+        const auto got = static_cast<std::size_t>(in.gcount());
+        if (got == 0) break;
+        auto c = write_chunk(file_, std::span(piece).first(got), options_);
+        if (!c) return std::unexpected(c.error());
+        list.push_back(*c);
+        leaves.push_back(c->sha256);
+        size += got;
+        if (got < piece.size()) break;
+    }
+    if (in.bad()) return fail(Code::io, "cannot read " + source.string());
+    if (size == 0) return fail(Code::malformed, "an empty entry cannot be chunked");
+    if (size > options_.limits.max_entry_size) return fail(Code::limit, "past the entry size limit (did the file grow?)");
+    e.codec = Codec::chunked;
+    e.size = size;
+    e.dictionary = 0;
+    e.digest = size <= chunk_size ? leaves.front() : tree_hash_from_leaves(leaves, size);
+    return list;
+}
+
 Result<Commit> Writer::commit() {
     if (staged_.empty()) return fail(Code::malformed, "nothing staged to commit");
     // The live state after this commit, and the records this commit writes.
@@ -954,67 +1246,30 @@ Result<Commit> Writer::commit() {
             live.erase(path);
             continue;
         }
-        if (s.kind == Staged::Kind::metadata) {
-            Entry e = live.at(path);
-            e.title = s.options.title, e.author = s.options.author, e.media_type = s.options.media_type;
-            e.attributes = s.options.attributes, e.created = s.options.created, e.updated = s.options.updated;
-            e.flags = s.options.flags;
-            if (e.codec == Codec::chunked) {
+        if (s.kind == Staged::Kind::edit) {
+            const Entry& base = live_.at(s.source);
+            Entry e = base;
+            e.path = path;
+            if (s.metadata) {
+                e.title = s.options.title, e.author = s.options.author, e.media_type = s.options.media_type;
+                e.attributes = s.options.attributes, e.created = s.options.created, e.updated = s.options.updated;
+                e.flags = s.options.flags;
+            }
+            if (base.codec == Codec::chunked) {
                 if (!before) {
                     auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
                     if (!a) return std::unexpected(a.error());
                     before = std::move(*a);
                 }
-                auto old = before->chunks(live.at(path));
+                auto old = before->chunks(base);
                 if (!old) return std::unexpected(old.error());
-                chunks.emplace(path, std::move(*old));
-            }
-            records.push_back(e);
-            live.insert_or_assign(path, e);
-            continue;
-        }
-        if (s.kind == Staged::Kind::range) {
-            if (!before) {
-                auto a = Archive::open(file_.path(), ReadOptions{options_.limits});
-                if (!a) return std::unexpected(a.error());
-                before = std::move(*a);
-            }
-            Entry e = live.at(path);
-            auto old = before->chunks(e);
-            if (!old) return std::unexpected(old.error());
-            const std::uint64_t new_size = std::max(e.size, s.range_offset + s.content.size());
-            const std::uint64_t n = (new_size + chunk_size - 1) / chunk_size;
-            std::vector<Chunk> fresh;
-            for (std::uint64_t i = 0; i < n; ++i) {
-                const std::uint64_t lo = i * chunk_size, hi = std::min(new_size, lo + chunk_size);
-                const bool touched = s.range_offset < hi && s.range_offset + s.content.size() > lo;
-                const bool same_size = i < old->size() && (*old)[i].size == hi - lo;
-                if (!touched && same_size) {
-                    fresh.push_back((*old)[i]);  // named again, not written again (§3.6)
-                    continue;
+                if (s.ops.empty()) {
+                    chunks.emplace(path, std::move(*old));  // named again, not written again (§3.6)
+                } else if (auto r = apply_ops(*before, base, s.ops, *old, e, chunks[path]); !r) {
+                    return std::unexpected(r.error());
                 }
-                // The chunk's bytes: the old ones (verified), then the range over them.
-                std::vector<std::byte> piece(static_cast<std::size_t>(hi - lo));
-                if (lo < e.size) {
-                    auto bytes = before->read_range(e, lo, std::min(e.size, hi) - lo);
-                    if (!bytes) return std::unexpected(bytes.error());
-                    std::ranges::copy(*bytes, piece.begin());
-                }
-                const std::uint64_t from = std::max(lo, s.range_offset), to = std::min(hi, s.range_offset + s.content.size());
-                if (from < to) {
-                    std::copy(s.content.begin() + static_cast<std::ptrdiff_t>(from - s.range_offset),
-                              s.content.begin() + static_cast<std::ptrdiff_t>(to - s.range_offset),
-                              piece.begin() + static_cast<std::ptrdiff_t>(from - lo));
-                }
-                auto c = write_chunk(file_, piece, options_);
-                if (!c) return std::unexpected(c.error());
-                fresh.push_back(*c);
+                if (e.codec != Codec::chunked) chunks.erase(path);
             }
-            std::vector<Digest> leaves;
-            for (const Chunk& c : fresh) leaves.push_back(c.sha256);
-            e.size = new_size;
-            e.digest = new_size <= chunk_size ? leaves.front() : tree_hash_from_leaves(leaves, new_size);
-            chunks.emplace(path, std::move(fresh));
             records.push_back(e);
             live.insert_or_assign(path, e);
             continue;
@@ -1025,6 +1280,29 @@ Result<Commit> Writer::commit() {
         const PutOptions& o = s.options;
         e.title = o.title, e.author = o.author, e.media_type = o.media_type, e.attributes = o.attributes;
         e.created = o.created, e.updated = o.updated, e.flags = o.flags;
+        if (s.file) {
+            std::error_code ec;
+            const std::uint64_t n = std::filesystem::file_size(*s.file, ec);
+            if (ec) return fail(Code::io, std::format("cannot read {}: {}", s.file->string(), ec.message()), path);
+            if (n > options_.limits.max_entry_size) return fail(Code::limit, "past the entry size limit", path);
+            const bool stream = o.store == Store::chunked ||
+                                (o.store == Store::automatic && n > options_.limits.max_unchunked_size && !(o.flags & flag::mappable));
+            if (stream) {
+                auto list = put_streamed(*s.file, e);
+                if (!list) return std::unexpected(Error{list.error().code, list.error().message, path});
+                chunks.emplace(path, std::move(*list));
+                records.push_back(e);
+                live.insert_or_assign(path, e);
+                continue;
+            }
+            // Small enough to hold: read it, and put it as any other.
+            std::ifstream in(*s.file, std::ios::binary);
+            s.content.resize(static_cast<std::size_t>(n));
+            if (!in.read(reinterpret_cast<char*>(s.content.data()), static_cast<std::streamsize>(n))) {
+                return fail(Code::io, "cannot read " + s.file->string(), path);
+            }
+            s.file.reset();
+        }
         const bool chunk = o.store == Store::chunked ||
                            (o.store == Store::automatic && s.content.size() > options_.limits.max_unchunked_size && !(o.flags & flag::mappable));
         if (path == "SQ-INF/manifest.json") {
@@ -1220,9 +1498,10 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
     return w->commit();
 }
 
-Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
-    auto lock = Lock::take(path, options.lock);
-    if (!lock) return std::unexpected(lock.error());
+namespace {
+
+/// compact(), its lock already held.
+Result<Commit> compact_locked(const std::filesystem::path& path, const WriteOptions& options) {
     auto old = Archive::open(path, ReadOptions{options.limits});
     if (!old) return std::unexpected(old.error());
     auto source = Appender::open(path, false);
@@ -1237,7 +1516,7 @@ Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
     for (std::size_t i = 0; i < magic.size(); ++i) header[i] = static_cast<std::byte>(magic[i]);
     le(header, 8, major_version, 2);
     le(header, 12, header_bytes, 4);
-    if (auto r = out->append(header); !r) return r;
+    if (auto r = out->append(header); !r) return std::unexpected(r.error());
     // Dictionaries no live entry uses are dropped.
     std::set<std::uint32_t> used;
     auto old_live = old->entries();
@@ -1308,8 +1587,35 @@ Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
     }
     std::filesystem::rename(temporary, path, ignore);
     if (ignore) return fail(Code::io, std::format("cannot rename {} over {}: {}", temporary.string(), path.string(), ignore.message()));
-    if (options.sync) return flush_folder(path);
+    if (options.sync) {
+        if (auto r = flush_folder(path); !r) return std::unexpected(r.error());
+    }
+    return *c;
+}
+
+}  // namespace
+
+Result<void> compact(const std::filesystem::path& path, WriteOptions options) {
+    auto lock = Lock::take(path, options.lock);
+    if (!lock) return std::unexpected(lock.error());
+    auto c = compact_locked(path, options);
+    if (!c) return std::unexpected(c.error());
     return {};
+}
+
+Result<Commit> Writer::compact() {
+    if (!staged_.empty()) return fail(Code::malformed, "commit or discard what is staged before compacting");
+    const std::filesystem::path path = file_.path();
+    auto c = compact_locked(path, options_);
+    if (!c) return std::unexpected(c.error());
+    // The compacted file is a new one at the same path: write to it from now on.
+    auto f = Appender::open(path, false);
+    if (!f) return std::unexpected(f.error());
+    file_ = std::move(*f);
+    auto a = Archive::open(path, ReadOptions{options_.limits});
+    if (!a) return std::unexpected(a.error());
+    if (auto r = adopt(*a); !r) return std::unexpected(r.error());
+    return *c;
 }
 
 }  // namespace sq::cart
