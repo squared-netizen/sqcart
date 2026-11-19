@@ -296,5 +296,15 @@ int main() {
         check(read_back(p, "b.txt") == bytes("after") && read_back(p, "a.bin") == pattern(200000, 22), "to the compacted file");
         check(checks(p), "check passes");
     }
+    // set_commit_time: the next commit records it.
+    {
+        const auto p = scratch("time.sq");
+        start(p, {});
+        auto w = Writer::open(p, quick_options());
+        w->set_commit_time(1800000000123);
+        static_cast<void>(w->put("t", bytes("t")));
+        auto c = w->commit();
+        check(c && c->time == 1800000000123 && Archive::open(p)->commit().time == 1800000000123, "set_commit_time: the commit records it");
+    }
     return report("edit");
 }
