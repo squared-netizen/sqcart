@@ -110,7 +110,7 @@ int main() {
         check(has(check_memory(b.file()), warning, "after the current commit"), "R11: check reports them");
     }
     // R12 / §4.1: paths.
-    for (const char* bad : {"../escape", "/abs", "a//b", "a/./b", "a\\b", "c:x", "tab\there"}) {
+    for (const char* bad : {"../escape", "/abs", "a//b", "a/./b", "a\\b", "c:x", "tab\there", "cafe\u0301.txt"}) {
         auto b = simple({{.path = bad, .content = bytes("x")}});
         auto r = Archive::open_memory(b.file());
         check(!r && r.error().code == Code::path, std::format("R12: the path \"{}\" is refused", bad));

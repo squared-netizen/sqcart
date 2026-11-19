@@ -1,9 +1,13 @@
-# sq.cart: the 3.0 reader
+# sq.cart: the 3.0 reader and writer
 
-The reader for the [Squared Cartridge Specification
-3.0](../docs/developer/specs/sq-cartridge-3.0.md), as C++23 modules: module
-`sq.cart`, namespace `sq::cart`. Phase 1: open, look up, read and verify,
-check signatures, validate. The writer (commits, compaction) is phase 2.
+The reader and writer for the [Squared Cartridge Specification
+3.0](../docs/developer/specs/sq-cartridge-3.0.md), as C++23 modules, in
+namespace `sq::cart`:
+
+- `sq.cart`: open, look up, read and verify, check signatures, validate.
+- `sq.cart.write`: commit, compact, sign. Its own module, so a program that
+  only reads carries no compressor.
+
 Nothing here shares code with the 2.0 library in `../src`; 3.0 does not have
 to be compatible with it.
 
@@ -19,6 +23,28 @@ if (auto e = cart->find("world/settlements/9001.json")) {
 }
 auto report = sq::cart::check("world.sq");       // §12, in full
 ```
+
+```cpp
+import sq.cart.write;
+
+auto w = sq::cart::Writer::open("world.sq");     // takes world.sq.lock (§10.2)
+w->put("world/settlements/9001.json", bytes, {.title = "Northford", .flags = sq::cart::flag::r | sq::cart::flag::w});
+w->put_range("world/map.bin", offset, patch);    // a chunked entry: only the chunks it touches
+w->set_metadata("README.md", {.title = "Read me"});  // no content written again (§3.6)
+w->remove("old.txt");
+w->sign_with(sq::cart::SigningKey::from_seed(seed, "Jesse"));
+auto commit = w->commit();                       // append, flush, spare slot, flush (§10.3)
+sq::cart::compact("world.sq");                   // §10.4
+
+auto id = w->train_dictionary(samples);          // many small, similar entries (§4.3)
+w->put("world/settlements/9001.json", record, {.dictionary = *id});
+```
+
+The writer stores what is compressed already (by media type) or would not
+shrink 5%, chunks entries past 64 MiB, stores the manifest and mappable
+entries, writes a full index first and before the delta chain would pass its
+limit, and reads every commit back through the reader before it reports it
+done.
 
 ## Building
 
@@ -39,7 +65,7 @@ Offline: everything else is in `../third_party`:
 |---|---|
 | `squared-data` | squared's JSON facade, `sq.data` (`../tools/vendor_squared_data.sh` copies it): sq.cart reads and writes JSON only through it |
 | `yyjson-0.12.0` | what sq.data parses with |
-| `zstd-1.5.7` | zstd's single-file decoder (codecs 1 and 2) |
+| `zstd-1.5.7` | zstd: its decoder alone for readers, the whole library for the writer |
 | `monocypher-4.0.3` | Ed25519, from its optional file (§9.3, Appendix B.1) |
 
 ## The pieces
@@ -50,12 +76,23 @@ Offline: everything else is in `../third_party`:
 | `:bytes` | where the bytes are (pread on a file, or memory), little-endian fields, overflow-checked sums |
 | `:sha256` | SHA-256, and the entry digest's tree over 1 MiB leaves (§9.1) |
 | `:json` | I-JSON and RFC 8785, through sq.data |
-| `:fold` | Unicode full case folding, for paths that collide (§4.1); `casefold.inc` is generated from Python's `str.casefold` |
+| `:fold` | Unicode for paths (§4.1): full case folding, for paths that collide, and Normalization Form C, which every path must be in (the reader refuses others; `pack` converts a Mac's decomposed names). `casefold.inc` and `nfc.inc` are generated from Python's `str.casefold` and `unicodedata` (`tools/gen_casefold.py`, `tools/gen_nfc.py`); NFC was checked against Python for every code point and 20,000 mixed strings |
 | `:zstd` | one frame, its size and window and dictionary checked before it is decoded (§4.3) |
 | `:ed25519` | verification that refuses non-canonical encodings (§9.3) |
 | `:archive` | `Archive`, `Entry`, `Commit`, signatures, and `check` |
 
-`sqcart3 check|ls|cat|info FILE` is the reader on the command line.
+`sqcart3` is both on the command line: `check`, `ls`, `cat`, `info` and
+`unpack` to read; `new`, `put`, `rm`, `compact`, `keygen` and `pack` to write
+(`--sign KEYFILE` signs a commit). `make` also builds `sqcart3-read`, the
+read commands linked against the reading archives alone: it holds no zstd
+compressor.
+
+| Archive | Holds | Link for |
+|---|---|---|
+| `libsqcart.a` | sq.cart, sq.data, yyjson, Monocypher | both |
+| `libsqcart-unzstd.a` | zstd's decoder | reading only |
+| `libsqcart-write.a` | sq.cart.write | writing |
+| `libsqcart-zstd.a` | all of zstd (its decoder too: never with `-unzstd`) | writing |
 
 ## The tests
 
@@ -67,8 +104,9 @@ that a reader can see.
 
 ## Not yet
 
-- **Normalization.** Paths must be NFC (§4.1); like the 2.0 library, this
-  reader does not check it (it would need the NFC tables).
+- **Staging** is in memory: a commit's content is held until it is written.
+  Staging large changes on disk is the Drive's (§10.5).
+
 - **Old data regions.** A run may name data an earlier commit wrote
   (§3.6). The reader checks it lies in the file, past the header, and in
   no index, string table or record of the commits it walks; commits before

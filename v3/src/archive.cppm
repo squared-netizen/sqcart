@@ -166,6 +166,17 @@ struct CheckReport {
 
 class Archive;
 
+/// One chunk of a chunked entry (§4.5, A.6).
+struct Chunk {
+    std::uint64_t offset = 0;
+    std::uint32_t stored_size = 0;
+    std::uint32_t size = 0;
+    Codec codec = Codec::stored;
+    std::uint32_t dictionary = 0;
+    Digest sha256{};
+    bool reserved_clear = true;
+};
+
 /// The message a signature signs (§9.3): "squared-cartridge/3 signature",
 /// 0, the algorithm (u16), id, 0, version, 0, signer, 0, the content digest.
 [[nodiscard]] std::vector<std::byte> signed_message(std::uint16_t algorithm, std::string_view id, std::string_view version,
@@ -211,6 +222,33 @@ class Archive;
     return write_canonical(data::JsonValue(std::move(meta)));
 }
 
+/// The content digest of a state (§9.2): its live entries, sorted by path.
+[[nodiscard]] Result<Digest> content_digest(std::span<const Entry> live) {
+    Sha256 h;
+    const auto field = [&](std::span<const std::byte> bytes) {
+        std::array<std::byte, 4> le{};
+        for (std::size_t i = 0; i < 4; ++i) le[i] = static_cast<std::byte>(bytes.size() >> (8 * i));
+        h.update(le);
+        h.update(bytes);
+    };
+    h.update(std::string_view("squared-cartridge/3 state\0", 26));
+    std::array<std::byte, 8> count{};
+    for (std::size_t i = 0; i < 8; ++i) count[i] = static_cast<std::byte>(std::uint64_t{live.size()} >> (8 * i));
+    h.update(count);
+    for (const Entry& e : live) {
+        auto meta = metadata_json(e);
+        if (!meta) {
+            auto err = meta.error();
+            err.entry = e.path;
+            return std::unexpected(err);
+        }
+        field(std::as_bytes(std::span(e.path)));
+        field(e.digest);
+        field(std::as_bytes(std::span(*meta)));
+    }
+    return h.finish();
+}
+
 /// Whether a path follows §4.1 (as 2.0 §3.3): relative, '/'-separated, no
 /// '.', '..' or empty segment, no NUL, backslash, ':' or control character,
 /// within `max_bytes`, valid UTF-8. The reason when it does not.
@@ -218,6 +256,7 @@ class Archive;
     if (path.empty()) return "an empty path";
     if (path.size() > max_bytes) return std::format("a path of {} bytes, past {}", path.size(), max_bytes);
     if (!valid_utf8(path)) return "a path that is not valid UTF-8";
+    if (!is_nfc(path)) return "a path not in Normalization Form C (a Mac's decomposed names: pack converts them)";
     if (path.front() == '/') return "an absolute path";
     for (std::size_t i = 0; i < path.size(); ++i) {
         const auto c = static_cast<unsigned char>(path[i]);
@@ -268,16 +307,6 @@ struct Loaded {
     Commit commit;
     std::vector<std::byte> index;
     std::vector<std::byte> strings;
-};
-
-struct Chunk {
-    std::uint64_t offset = 0;
-    std::uint32_t stored_size = 0;
-    std::uint32_t size = 0;
-    Codec codec = Codec::stored;
-    std::uint32_t dictionary = 0;
-    Digest sha256{};
-    bool reserved_clear = true;
 };
 
 [[nodiscard]] Slot read_slot(std::span<const std::byte> header, std::uint64_t at, std::uint64_t file_size) {
@@ -585,22 +614,12 @@ public:
 
     /// The content digest of the current state, from the live entries
     /// (§9.2): compare with commit().content_digest.
-    [[nodiscard]] Result<Digest> compute_content_digest() const {
-        Sha256 h;
-        h.update(std::string_view("squared-cartridge/3 state\0", 26));
-        put_u64(h, live_.size());
-        for (const Entry& e : live_) {
-            auto meta = metadata_json(e);
-            if (!meta) {
-                auto err = meta.error();
-                err.entry = e.path;
-                return std::unexpected(err);
-            }
-            put_field(h, std::as_bytes(std::span(e.path)));
-            put_field(h, e.digest);
-            put_field(h, std::as_bytes(std::span(*meta)));
-        }
-        return h.finish();
+    [[nodiscard]] Result<Digest> compute_content_digest() const { return content_digest(live_); }
+
+    /// A chunked entry's chunks (§4.5), its table checked against its digest.
+    [[nodiscard]] Result<std::vector<Chunk>> chunks(const Entry& e) const {
+        if (e.codec != Codec::chunked) return fail(Code::malformed, "not a chunked entry", e.path);
+        return chunk_table(e);
     }
 
     /// The current commit's signatures, each verified (§9.3); empty when it
@@ -656,18 +675,6 @@ public:
 
 private:
     Archive() = default;
-
-    static void put_u64(Sha256& h, std::uint64_t v) {
-        std::array<std::byte, 8> le{};
-        for (std::size_t i = 0; i < 8; ++i) le[i] = static_cast<std::byte>(v >> (8 * i));
-        h.update(le);
-    }
-    static void put_field(Sha256& h, std::span<const std::byte> bytes) {
-        std::array<std::byte, 4> le{};
-        for (std::size_t i = 0; i < 4; ++i) le[i] = static_cast<std::byte>(bytes.size() >> (8 * i));
-        h.update(le);
-        h.update(bytes);
-    }
 
     static Result<Archive> open_source(std::unique_ptr<Source> source, const ReadOptions& options) {
         Archive a;
