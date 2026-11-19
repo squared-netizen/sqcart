@@ -33,6 +33,7 @@ w->put_range("world/map.bin", offset, patch);    // a chunked entry: only the ch
 w->resize("world/map.bin", 8 << 20);             // cut, or grow with zeros
 w->rename("world/map.bin", "maps/world.bin");    // the same runs, named again: nothing copied (§3.6)
 w->put_file("video/intro.webm", "/sdcard/intro.webm");  // read at commit, 1 MiB at a time
+w->put_range_file("world/map.bin", offset, "patch.bin", 0, n);  // a range, read from a file at commit
 w->set_metadata("README.md", {.title = "Read me"});  // no content written again (§3.6)
 w->remove("old.txt");
 w->sign_with(sq::cart::SigningKey::from_seed(seed, "Jesse"));
@@ -45,7 +46,9 @@ w->put("world/settlements/9001.json", record, {.dictionary = *id});
 
 Any number of ranges and resizes may be staged for one entry; they apply
 in the order given, and `size()` says what the entry's size will be. A
-second writer gets `Code::busy`; `discard()` drops what is staged.
+second writer gets `Code::busy`; `discard()` drops what is staged. A
+commit that fails before its record is written cuts the file back to what
+it was.
 
 The writer stores what is compressed already (by media type) or would not
 shrink 5%, chunks entries past 64 MiB, stores the manifest and mappable
@@ -128,7 +131,7 @@ that a reader can see.
 
 ## Not yet
 
-- **Staging** is in memory, except `put_file`, which reads at commit: a
+- **Staging** is in memory, except `put_file` and `put_range_file`, which read at commit: a
   commit's content is held until it is written. Staging large changes on
   disk, and deciding when to commit, is the Drive's (sqdrive, §10.5).
 

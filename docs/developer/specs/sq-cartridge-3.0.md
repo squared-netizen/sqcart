@@ -640,6 +640,10 @@ The envelope of 2.0 §5.1 carries over with these changes:
   commit record (§9). A 3.0 writer MUST NOT write it, and a reader MUST
   ignore one.
 - The manifest is I-JSON (§5).
+- **One file extension.** A cartridge's file name ends in `.sq`, whatever
+  its kind (Appendix B.2). The manifest's `kind` says what it is: a reader
+  MUST NOT take a kind from a file's name, and a tool that lists or opens
+  cartridges by kind reads the manifest.
 
 Consumers keep their sections. For example, sqterm's packages already
 use the envelope (kind `package`). A package's description and the
@@ -1167,18 +1171,27 @@ size is 64 × ⌈size / 2^20⌉.
    digest never depends on a writer's choice; a different size would be a
    new major version.
 
-### B.2 Open
+### B.2 Decided (2026-11-19)
 
-1. **The delta chain limit.** 32 bounds the worst lookup at 33 binary
-   searches. A smaller limit compacts more often; a larger one commits
-   more cheaply between compactions.
-2. **sqterm's packages as 3.0 cartridges.** pkg would read `.sq`
-   through sqcart's reader instead of tar and zstd, and a package would
-   gain per-file metadata and a signature. The cost is that a package
-   is no longer a tarball a person can open with `tar`.
-3. **Per-kind extensions.** 2.0 Appendix B.2's question returns: one
-   `.sq` for everything, or `.sqm` for manuals and others for
-   readability, with the manifest still authoritative.
-4. **Record schemas.** §5 names a schema by a consumer's string. Whether
-   the SDK should share schemas (a JSON Schema per name, in a cartridge
-   of its own) is open.
+1. **The delta chain limit stays 32** (§3.5). A lookup walks at most 33
+   indexes; on a cartridge of 100,000 entries a `find` takes 9 µs. The
+   Drive commits often (by default every 64 MiB or 30 s), so a cartridge
+   it writes gets a full index every 33rd commit: 128 bytes a live entry,
+   12.8 MB for 100,000. A writer MAY write full indexes sooner; a reader
+   MUST still accept 32.
+2. **sqterm's packages are 3.0 cartridges**, kind `package` (§7): pkg reads
+   them through sqcart's reader instead of tar and zstd, and a package
+   gains per-file metadata and, when it is signed, a signature (§9.3).
+   Nothing in this format changes for it; the move is sqterm's (its
+   packages' build, pkg, the app's first start). A package is no longer a
+   tarball a person opens with `tar`: `sqcart3 unpack` opens it.
+3. **One extension, `.sq`**, for every kind (§7): one name to recognise,
+   one media type to register, and no extension that can disagree with
+   the manifest it names.
+4. **No shared record schemas, for now.** A record's schema stays a name
+   of its consumer's choosing (§5). This is revisited when two consumers
+   share a record kind.
+
+### B.3 Open
+
+None.
