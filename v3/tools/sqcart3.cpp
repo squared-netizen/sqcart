@@ -6,7 +6,7 @@
 //   sqcart3 ls FILE                    the live entries: flags, size, codec, path, title
 //   sqcart3 cat FILE PATH              an entry's content, verified, to stdout
 //   sqcart3 info FILE                  the commit, the manifest, the signatures
-//   sqcart3 unpack FILE DIR [--merge]  the exploded form (§6.1): files, and SQ-INF/entries.json
+//   sqcart3 unpack FILE DIR [--merge]  the exploded form (§6): files, and SQ-INF/entries.json
 //
 //   sqcart3 new FILE MANIFEST          a new cartridge, its manifest from a file
 //   sqcart3 put FILE PATH SOURCE       an entry from a file (- for stdin), committed

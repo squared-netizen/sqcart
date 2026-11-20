@@ -5,8 +5,8 @@ review (`sq-cartridge-3.0-red-team.md`, which explains every change and
 its evidence), with every open question decided (Appendix B).** It is
 implemented by `sq.cart` and `sq.cart.write` (`v3/`), and in use: sqterm's
 packages are 3.0 cartridges, and the Virtual Cartridge Drive (sqdrive)
-works on them. It becomes the SDK's one format when squared's templates,
-kits and packages move to it, once, with squared-pg reading it (§13).
+works on them. It becomes the SDK's one format when the SDK's remaining
+2.0 cartridges move to it, once (§13).
 Version 2.0 (`sq-cartridge-2.0.md`) is not carried forward: nothing reads
 or converts it after that move.
 
@@ -39,7 +39,6 @@ listed below.
 | Dependencies | not defined | `requires` in the envelope, resolved offline by consumers (§8) |
 | Structured data | files | also record entries: flat JSON arrays of objects (§5) |
 | Exploded form | `SQ-INF/manifest.json` | the same, plus `SQ-INF/entries.json` for entry metadata (§6) |
-| Workspaces | squared-pg's `.squared/metadata.json` | a workspace is an exploded cartridge of kind `workspace` (§6.2) |
 | Streaming | a ZIP can be read front to back | a 3.0 cartridge needs random access: it cannot be read from a pipe (§3.3) |
 
 ## 0. Scope
@@ -53,8 +52,7 @@ separate tool built on sqcart; §10.5 says where the line between them
 runs.
 
 The independence requirement of 2.0 §0.1 stands: a cartridge is usable
-by any tool that implements this document, with no squared-pg, square
-or framework present.
+by any tool that implements this document, with no other tool present.
 
 ## 1. Design goals
 
@@ -334,7 +332,7 @@ rule above does not apply to it: its live paths MAY collide under case
 folding, and a reader MUST NOT refuse it for that. They stay distinct
 paths (logical paths are case-sensitive). Unpacking it onto a file system
 that folds case fails, at the second of two colliding paths, rather than
-losing the first: §6.1's unpack never overwrites. It is for content that
+losing the first: §6's unpack never overwrites. It is for content that
 holds such names already, as Linux's kernel headers do
 (`linux/netfilter/xt_MARK.h` and `xt_mark.h`, in sqterm's sysroot
 package). `case_sensitive` MUST be `true` or `false` when present; absent
@@ -548,9 +546,7 @@ and content that is a JSON array whose every element is a JSON object:
   data changes at run time SHOULD split it so that one change touches
   one small entry.
 
-## 6. Exploded form, and workspaces
-
-### 6.1 Exploded form
+## 6. Exploded form
 
 A folder holding `SQ-INF/manifest.json` is a cartridge (2.0 §3.5, kept).
 Its entries are the folder's regular files; there is no index, no codec
@@ -562,7 +558,10 @@ entries:
   rather than follow it, and MUST NOT read a file through a path whose
   folders include one: a link inside the folder would otherwise pack a
   file from outside it (red-team R12);
-- the top-level `.squared/` and `.git/` folders (§6.2).
+- a top-level folder whose name begins with a dot (`.git/`, and any
+  tool's working state, which a consumer keeps beside its cartridge's
+  entries, not among them). A file or a deeper folder whose name begins
+  with a dot is an entry like any other.
 
 Entry metadata that a file system cannot hold goes in an optional
 `SQ-INF/entries.json`: a JSON object from path to the metadata of §4.2,
@@ -615,33 +614,6 @@ commit record (§9.3). A signed cartridge unpacked and packed again has
 the same content digest, so its signatures can be copied onto the new
 commit (`sqcart pack --signatures-from <file>`) and still verify.
 
-### 6.2 Workspaces
-
-A **workspace** (a project created by sqpg and managed by square) is an
-exploded cartridge of kind `workspace`: its root holds
-`SQ-INF/manifest.json`. That replaces squared-pg's
-`.squared/metadata.json` with the same format every other manifest uses.
-
-- The envelope's `provenance` (2.0 §5.5) names the template, kits,
-  packages and framework the workspace was made from.
-- `consumers.square` holds what square keeps: the roles (where the app,
-  its layouts and its assets are). Its shape is square's to define, as
-  every section's is its consumer's (square's spec §2.2).
-- The per-file provenance table (path, ownership class, origin, hash) is
-  square's too, in `SQ-INF/files.json` beside the manifest, so the
-  manifest stays small (square's spec §9).
-- The build conventions a template and its kits bring are ordinary
-  entries (`sq/build/*.lua`), which the workspace's `build.lua` includes.
-- Working state that is not part of the workspace's identity (square's
-  journal, staging folder and lock) stays out of `SQ-INF/`, in
-  `.squared/`, which is never an entry (§6.1). Neither is `.git/`. Build
-  output is the workspace tooling's to keep out of the tree, or out of
-  the archive with its own exclusions.
-
-An archived workspace is a snapshot: a backup, or a workspace shared as
-one file. It is valid, and the Drive (§10.5) can work on it like any
-other cartridge.
-
 ## 7. The manifest
 
 The envelope of 2.0 §5.1 carries over with these changes:
@@ -649,12 +621,12 @@ The envelope of 2.0 §5.1 carries over with these changes:
 - `format_version` MUST equal `3`.
 - `requires` is added (§8).
 - `tree` stays, with 2.0's rules.
-- `kind` stays opaque (2.0 §5.2.1). Kinds in use, for information:
-  `application` (2.0's `cartridge`, renamed so it no longer shares the
-  format's own name), `template`, `kit`, `package`, `asset_bundle`,
-  `plugin`, and new in 3.0, `workspace` (§6.2), `manual` (Manuals'
-  documentation) and `data` (a cartridge of records, such as a game
-  world).
+- `kind` stays opaque (2.0 §5.2.1): a string a consumer gives its
+  cartridges, which this specification never interprets or lists. What
+  a kind means, and what may be done with a cartridge of it, is its
+  consumers' to say.
+- `provenance` (2.0 §5.5) is removed. Where a cartridge came from, and
+  what it was made from, is its consumers' to record, in their sections.
 - `SQ-INF/hashes.json` is removed: integrity lives in the index and the
   commit record (§9). A 3.0 writer MUST NOT write it, and a reader MUST
   ignore one.
@@ -666,10 +638,11 @@ The envelope of 2.0 §5.1 carries over with these changes:
   MUST NOT take a kind from a file's name, and a tool that lists or opens
   cartridges by kind reads the manifest.
 
-Consumers keep their sections. For example, sqterm's packages already
-use the envelope (kind `package`). A package's description and the
-commands it installs belong in `consumers.sqterm`, as pkg's design
-needs: that is sqterm's data, not the format's.
+**Consumers keep their sections** (2.0 §5.6, kept). The format gives a
+cartridge an identity, a kind, a version, dependencies, entries and
+signatures; everything a cartridge means beyond that is in
+`consumers.<consumer>`, read and written only by that consumer, and
+carried by every reader and writer unread and unchanged.
 
 ## 8. Dependencies
 
@@ -677,8 +650,8 @@ A cartridge can name the cartridges it needs:
 
 ```json
 "requires": [
-  { "id": "package.squared-core", "version": "^1.1.0" },
-  { "id": "kit.lua", "version": ">=0.3.0 <0.5.0", "optional": true }
+  { "id": "org.example.base", "version": "^1.1.0" },
+  { "id": "org.example.extra", "version": ">=0.3.0 <0.5.0", "optional": true }
 ]
 ```
 
@@ -708,8 +681,8 @@ differently), so 3.0 fixes one grammar and its meaning:
 
 A reader validates the shape and the grammar, and nothing more: it MUST
 NOT resolve, download or open anything because of `requires`.
-Resolution belongs to consumers (square and pkg, against the cartridges
-installed on the machine), offline as everything else. A consumer that
+Resolution belongs to consumers (against the cartridges installed on the
+machine, as each consumer finds them), offline as everything else. A consumer that
 cannot satisfy a requirement that is not optional MUST say which and
 why, and MUST NOT proceed as if it had.
 
@@ -824,8 +797,7 @@ commit is unsigned as unsigned, even when an earlier commit was signed.
 Compaction copies the signature block, which still verifies (§10.4).
 
 This specification defines how to verify a signature, not whom to
-trust. Trust policy belongs to consumers: pkg's list of trusted keys, a
-launcher's, square's. A reader MUST NOT report a cartridge as trusted,
+trust. Trust policy belongs to consumers, each with its own list of keys. A reader MUST NOT report a cartridge as trusted,
 only as signed by a key, or unsigned.
 
 ### 9.4 What a signature does not cover
@@ -1047,25 +1019,17 @@ dictionaries, and, for an exploded cartridge, orphans in
 ## 13. From 2.0
 
 - **No conversion tool, and no 2.0 reading** (decided 2026-11-20). The
-  SDK's 2.0 cartridges are few and in its own repositories: squared's
-  templates, kits and package, as exploded cartridges. They move once, by
-  a script in squared (`tools/cartridges_to_3.lua`): `format_version` 3, a
-  `kind` of `cartridge` becomes `application`, `SQ-INF/hashes.json`
-  dropped (integrity is the index's, §9), and flags `x` on Lua source in
-  `SQ-INF/entries.json`. Their tree is unchanged.
+  SDK's 2.0 cartridges are few and in its own repositories; each moves
+  once, by a script in the repository that holds it: `format_version` 3,
+  `SQ-INF/hashes.json` dropped (integrity is the index's, §9),
+  `provenance` moved into the consumer's own section (§7), and flags in
+  `SQ-INF/entries.json` where an entry needs more than `r`.
 - A 3.0 reader reads 3.0 only, and refuses a ZIP as "not a 3.0
   cartridge". It never decides between formats, so it can never be shown
   two cartridges in one file (a ZIP is found from its end, so one file
   can be a valid 3.0 cartridge and a valid ZIP: Android's Janus flaw,
   CVE-2017-13156, was one file both an APK and a DEX).
 - A 3.0 writer writes 3.0 only.
-- squared-pg reads 3.0 (through `sq.cart`) before the move, and only 3.0
-  after it.
-- squared-pg workspaces move from `.squared/metadata.json` to
-  `SQ-INF/manifest.json` once, through square (§6.2).
-- sqterm's packages (`.tar.zst` with an `SQ-INF/manifest.json` inside)
-  can become 3.0 cartridges, read by pkg through sqcart's reader. That
-  is a separate decision, recorded in Appendix B.2.
 
 ## Appendix A: byte layouts
 
@@ -1202,17 +1166,11 @@ size is 64 × ⌈size / 2^20⌉.
    it writes gets a full index every 33rd commit: 128 bytes a live entry,
    12.8 MB for 100,000. A writer MAY write full indexes sooner; a reader
    MUST still accept 32.
-2. **sqterm's packages are 3.0 cartridges**, kind `package` (§7): pkg reads
-   them through sqcart's reader instead of tar and zstd, and a package
-   gains per-file metadata and, when it is signed, a signature (§9.3).
-   Nothing in this format changes for it; the move is sqterm's (its
-   packages' build, pkg, the app's first start). The symbolic links a
-   package installs are sqterm's data, listed in its manifest's
-   `consumers.sqterm.links` (path to target) for pkg to make: a cartridge
-   still holds no link, and unpack (§6.1) still makes none. A package is
-   no longer a tarball a person opens with `tar`: `sqcart3 unpack` opens
-   it. The release carries both forms while the pkg already installed
-   reads only tarballs.
+2. **What a file system holds beyond regular files is a consumer's
+   data.** A cartridge still holds no symbolic link, and unpack (§6)
+   makes none: a consumer that installs links lists them in its own
+   section (sqterm's packages: `consumers.sqterm.links`, path to target)
+   and makes them itself. Nothing in this format changed for it.
 3. **One extension, `.sq`**, for every kind (§7): one name to recognise,
    one media type to register, and no extension that can disagree with
    the manifest it names.

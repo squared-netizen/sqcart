@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// sq.cart:exploded — a cartridge unpacked into a folder (§6.1): every live
+// sq.cart:exploded — a cartridge unpacked into a folder (§6): every live
 // entry a file, its metadata in SQ-INF/entries.json, created so that the
 // cartridge cannot write anywhere else. Packing a folder is the writer's
 // (sq.cart.write's pack).
@@ -100,7 +100,7 @@ Result<void> write_new(int folder, const std::string& name, std::span<const std:
 
 export namespace sq::cart {
 
-/// The metadata of an entry as SQ-INF/entries.json holds it (§6.1): only
+/// The metadata of an entry as SQ-INF/entries.json holds it (§6): only
 /// what differs from a plain file's (flags r, nothing else). Nothing when
 /// there is nothing to say.
 [[nodiscard]] std::optional<data::JsonValue> exploded_metadata(const Entry& e) {
@@ -130,7 +130,7 @@ struct UnpackOptions {
     bool merge = false;
 };
 
-/// Unpack a cartridge into `target` (§6.1): every live entry a file, read
+/// Unpack a cartridge into `target` (§6): every live entry a file, read
 /// and verified first; SQ-INF/entries.json for metadata a file system
 /// cannot hold, in canonical JSON. Refuses, before writing anything, a path
 /// Windows cannot create. Never follows a link; never makes a file

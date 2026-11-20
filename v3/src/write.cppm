@@ -885,14 +885,15 @@ private:
 
 struct PackOptions {
     /// Leave out records in SQ-INF/entries.json for files that are not
-    /// there (left by a rename outside the tools), rather than refuse (§6.1).
+    /// there (left by a rename outside the tools), rather than refuse (§6).
     bool drop_orphans = false;
 };
 
 /// Pack an exploded cartridge, `folder`, into a new cartridge, `out`, as one
-/// commit (§6.1): its regular files, with the metadata SQ-INF/entries.json
+/// commit (§6): its regular files, with the metadata SQ-INF/entries.json
 /// gives them; never a symbolic link (refused, not followed), never the
-/// top-level .squared/ or .git/, never entries.json itself.
+/// top-level folder whose name begins with a dot (.git/, a tool's working
+/// state), never entries.json itself.
 Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::path& out, WriteOptions options = {},
                     PackOptions pack_options = {}, std::optional<SigningKey> key = std::nullopt);
 
@@ -1552,12 +1553,14 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
         const fs::path rel = it->path().lexically_relative(folder);
         std::string name = rel.generic_string();
         // Names as the file system gives them; macOS decomposes them (NFD),
-        // and every path is NFC (§4.1, §6.1).
+        // and every path is NFC (§4.1, §6).
         if (!valid_utf8(name)) return fail(Code::path, "a name that is not UTF-8", name);
         name = nfc(name);
         const auto status = it->symlink_status(ec);
-        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6.1)", name);
-        if (it.depth() == 0 && fs::is_directory(status) && (name == ".squared" || name == ".git")) {
+        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6)", name);
+        // A top-level folder named with a dot: a tool's working state
+        // (.git/, and any consumer's), never entries (§6).
+        if (it.depth() == 0 && fs::is_directory(status) && name.starts_with(".")) {
             it.disable_recursion_pending();
             continue;
         }
@@ -1572,7 +1575,7 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
     for (const auto& [name, p] : files) present.insert(name);
     for (const auto& [path, o] : metadata) {
         if (!present.contains(path) && !pack_options.drop_orphans) {
-            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6.1)", path);
+            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6)", path);
         }
     }
     auto w = Writer::create(out, options);

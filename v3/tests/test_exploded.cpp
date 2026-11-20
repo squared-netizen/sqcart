@@ -58,6 +58,9 @@ int main() {
     write(src / "regions/north/settlement.json", record_json);
     write(src / ".squared/journal", "working state");
     write(src / ".git/HEAD", "ref: refs/heads/main");
+    write(src / ".anytool/cache", "another tool's working state");
+    write(src / ".profile", "a dot file at the top: an entry");
+    write(src / "art/.keep", "a dot file deeper down: an entry");
     write(src / "SQ-INF/entries.json",
           R"({"README.md":{"title":"Read me"},"regions/north/settlement.json":{"flags":"rw","media_type":"application/json","created":1794960000000,"attributes":{"population":41250,"name":"Northford"}}})");
 
@@ -68,8 +71,10 @@ int main() {
     auto a = Archive::open(cart);
     check(a.has_value(), "the packed cartridge opens");
     if (!a) return report("exploded");
-    check(a->entries()->size() == 4, "manifest, README, tile, settlement: four entries");
-    check(!a->find(".squared/journal") && !a->find(".git/HEAD"), ".squared/ and .git/ are never entries");
+    check(a->entries()->size() == 6, "manifest, README, tile, settlement, .profile, art/.keep: six entries");
+    check(!a->find(".squared/journal") && !a->find(".git/HEAD") && !a->find(".anytool/cache"),
+          "a top-level folder named with a dot is never entries");
+    check(a->find(".profile") && a->find("art/.keep"), "a dot file is an entry like any other");
     check(!a->find("SQ-INF/entries.json"), "entries.json is not an entry");
     check(a->find("README.md")->title == "Read me", "a title from entries.json");
     const auto s = a->find("regions/north/settlement.json");
@@ -80,10 +85,11 @@ int main() {
     // Unpack, and pack again: the same folder, the same digest.
     const fs::path out = root() / "unpacked";
     auto n = unpack(*a, out);
-    check(n && *n == 4, n ? "unpack" : n.error().message);
+    check(n && *n == 6, n ? "unpack" : n.error().message);
     auto want = tree(src);
     want.erase(".squared/journal");
     want.erase(".git/HEAD");
+    want.erase(".anytool/cache");
     auto got = tree(out);
     check(got.erase("SQ-INF/entries.json") == 1, "unpack writes entries.json");
     want.erase("SQ-INF/entries.json");
