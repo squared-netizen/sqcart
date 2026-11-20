@@ -82,6 +82,35 @@ int main() {
     check(s && s->attributes == R"({"name":"Northford","population":41250})", "attributes, canonical");
     check(check(cart).ok(), "check passes");
 
+    // --keep .git: a kept dot folder packed, its executable files flagged
+    // x; unpacked with executable, a hook runs again; without, it does not.
+    {
+        const fs::path g = root() / "with-git";
+        write(g / "SQ-INF/manifest.json", text(manifest()));
+        write(g / "README.md", "# with history\n");
+        write(g / ".git/HEAD", "ref: refs/heads/main");
+        write(g / ".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n");
+        fs::permissions(g / ".git/hooks/pre-commit", fs::perms::owner_exec, fs::perm_options::add);
+        write(g / ".squared/lock", "square's working state");
+        const fs::path gc = root() / "with-git.sq";
+        auto kept = pack(g, gc, quick(), {.keep = {".git"}});
+        check(kept.has_value(), kept ? "pack --keep .git" : kept.error().message);
+        auto ga = Archive::open(gc);
+        check(ga && ga->find(".git/HEAD") && !ga->find(".squared/lock"), ".git kept by name, .squared still left out");
+        check(ga && ga->find(".git/hooks/pre-commit") && (ga->find(".git/hooks/pre-commit")->flags & flag::x),
+              "an executable file in a kept folder is flagged x");
+        check(!pack(g, root() / "bad.sq", quick(), {.keep = {"git"}}).has_value(), "keep refuses a name without a dot");
+        check(!pack(g, root() / "bad.sq", quick(), {.keep = {".nothing"}}).has_value(), "keep refuses a folder that is not there");
+        if (ga) {
+            const fs::path plain = root() / "unpacked-plain", exec = root() / "unpacked-exec";
+            check(unpack(*ga, plain).has_value() && (fs::status(plain / ".git/hooks/pre-commit").permissions() & fs::perms::owner_exec) == fs::perms::none,
+                  "unpack makes nothing executable by default");
+            check(unpack(*ga, exec, {.executable = true}).has_value() &&
+                      (fs::status(exec / ".git/hooks/pre-commit").permissions() & fs::perms::owner_exec) != fs::perms::none,
+                  "unpack --executable restores the hook's executable bit");
+        }
+    }
+
     // Unpack, and pack again: the same folder, the same digest.
     const fs::path out = root() / "unpacked";
     auto n = unpack(*a, out);

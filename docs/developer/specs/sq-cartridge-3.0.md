@@ -380,7 +380,7 @@ titles and authors containing control characters.
 |---|---|---|
 | 0 | `r` | readable: offered to the runtime and to consumers. An entry without `r` is kept for tools only (sources, build notes) and a runtime reader MUST NOT hand it to application code |
 | 1 | `w` | writable: the Drive and other writers may replace or delete it. A writer MUST refuse to change an entry without `w` unless it is rebuilding the cartridge from its sources |
-| 2 | `x` | executable: a runtime may run it (Lua source, 2.0 §7). It never makes a file executable on disk (2.0 §3.1, kept), and native code stays forbidden (2.0 §8) |
+| 2 | `x` | executable: a runtime may run it (Lua source, 2.0 §7). Unpack makes a file executable on disk only when asked to (`--executable`, for one's own backup, §6), never by default, and native code stays forbidden (2.0 §8) |
 | 3 | `deleted` | a tombstone (§3.5) |
 | 4 | `mappable` | stored, 16384-aligned, for direct mapping (§3.6) |
 | 5 | `dictionary` | this entry is a zstd dictionary (§4.3); it carries no `r` |
@@ -560,8 +560,12 @@ entries:
   file from outside it (red-team R12);
 - a top-level folder whose name begins with a dot (`.git/`, and any
   tool's working state, which a consumer keeps beside its cartridge's
-  entries, not among them). A file or a deeper folder whose name begins
-  with a dot is an entry like any other.
+  entries, not among them), **unless the packer is asked to keep it by
+  name** (`sqcart pack --keep .git`): a backup keeps its history; a
+  cartridge to share leaves it out, with whatever `.git/config` holds. A
+  file or a deeper folder whose name begins with a dot is an entry like
+  any other. In a kept folder, which has no records in `entries.json`, a
+  file the file system marks executable gets flag `x`.
 
 Entry metadata that a file system cannot hold goes in an optional
 `SQ-INF/entries.json`: a JSON object from path to the metadata of §4.2,
@@ -603,6 +607,8 @@ every field across, so an archive packed from a folder and unpacked
 again gives the same folder. `sqcart unpack`:
 
 - refuses a target folder that is not empty, unless told to merge;
+- makes no file executable unless asked (`--executable`), and then only
+  an entry flagged `x`;
 - creates every file itself, with `O_CREAT | O_EXCL` and without
   following symbolic links, so an archive cannot write through a link
   planted in the target (the Zip Slip family, red-team R12);

@@ -83,8 +83,9 @@ Result<Fd> open_folder(int root, std::string_view rel, const std::string& entry)
     return at;
 }
 
-Result<void> write_new(int folder, const std::string& name, std::span<const std::byte> bytes, const std::string& entry) {
-    Fd fd(::openat(folder, name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644));
+Result<void> write_new(int folder, const std::string& name, std::span<const std::byte> bytes, const std::string& entry,
+                       ::mode_t mode = 0644) {
+    Fd fd(::openat(folder, name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode));
     if (!fd.ok()) return fail(Code::io, std::format("cannot create {}: {}", name, std::strerror(errno)), entry);
     std::size_t done = 0;
     while (done < bytes.size()) {
@@ -128,13 +129,17 @@ export namespace sq::cart {
 struct UnpackOptions {
     /// Write into a folder that has files already (never over one).
     bool merge = false;
+    /// Make an entry flagged x executable (mode 0755). Off by default: a
+    /// cartridge from elsewhere never puts a program on the disk without
+    /// being asked (§6). For one's own backup (a kept .git/ and its hooks).
+    bool executable = false;
 };
 
 /// Unpack a cartridge into `target` (§6): every live entry a file, read
 /// and verified first; SQ-INF/entries.json for metadata a file system
 /// cannot hold, in canonical JSON. Refuses, before writing anything, a path
 /// Windows cannot create. Never follows a link; never makes a file
-/// executable (2.0 §3.1, kept).
+/// executable unless asked (`executable`: an entry flagged x, 0755).
 [[nodiscard]] Result<std::size_t> unpack(const Archive& cart, const std::filesystem::path& target, UnpackOptions options = {}) {
     auto live = cart.entries();
     if (!live) return std::unexpected(live.error());
@@ -164,7 +169,8 @@ struct UnpackOptions {
         const std::size_t slash = e.path.rfind('/');
         auto folder = open_folder(root.get(), slash == std::string::npos ? std::string_view() : std::string_view(e.path).substr(0, slash), e.path);
         if (!folder) return std::unexpected(folder.error());
-        if (auto r = write_new(folder->get(), e.path.substr(slash == std::string::npos ? 0 : slash + 1), *bytes, e.path); !r) {
+        const ::mode_t mode = options.executable && (e.flags & flag::x) ? 0755 : 0644;
+        if (auto r = write_new(folder->get(), e.path.substr(slash == std::string::npos ? 0 : slash + 1), *bytes, e.path, mode); !r) {
             return std::unexpected(r.error());
         }
         if (auto m = exploded_metadata(e)) metadata.emplace(e.path, std::move(*m));

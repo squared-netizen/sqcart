@@ -6,7 +6,9 @@
 //   sqcart3 ls FILE                    the live entries: flags, size, codec, path, title
 //   sqcart3 cat FILE PATH              an entry's content, verified, to stdout
 //   sqcart3 info FILE                  the commit, the manifest, the signatures
-//   sqcart3 unpack FILE DIR [--merge]  the exploded form (§6): files, and SQ-INF/entries.json
+//   sqcart3 unpack FILE DIR [--merge] [--executable]
+//                                      the exploded form (§6): files, and SQ-INF/entries.json;
+//                                      --executable: entries flagged x made executable
 //
 //   sqcart3 new FILE MANIFEST          a new cartridge, its manifest from a file
 //   sqcart3 put FILE PATH SOURCE       an entry from a file (- for stdin), committed
@@ -14,7 +16,9 @@
 //   sqcart3 mv FILE FROM TO            an entry renamed, its content not copied (§3.6), committed
 //   sqcart3 truncate FILE PATH SIZE    an entry cut or grown with zeros, committed
 //   sqcart3 compact FILE               one commit, its live entries only (§10.4)
-//   sqcart3 pack DIR FILE [--drop-orphans]  an exploded cartridge packed, as one commit
+//   sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]...
+//                                      an exploded cartridge packed, as one commit; a top-level
+//                                      dot folder (.git) only when kept by name
 //   sqcart3 keygen KEYFILE             an Ed25519 signing key (a 32-byte seed, in hex, mode 0600)
 //
 // Options for new, put and rm:
@@ -38,7 +42,7 @@ namespace {
 int usage() {
     std::println(std::cerr, "usage: sqcart3 check|ls|info FILE\n"
                             "       sqcart3 cat FILE PATH\n"
-                            "       sqcart3 unpack FILE DIR [--merge]\n"
+                            "       sqcart3 unpack FILE DIR [--merge] [--executable]\n"
 #ifndef SQCART3_READ_ONLY
                             "       sqcart3 new FILE MANIFEST [options]\n"
                             "       sqcart3 put FILE PATH SOURCE [options]\n"
@@ -46,7 +50,7 @@ int usage() {
                             "       sqcart3 mv FILE FROM TO [options]\n"
                             "       sqcart3 truncate FILE PATH SIZE [options]\n"
                             "       sqcart3 compact FILE\n"
-                            "       sqcart3 pack DIR FILE [--drop-orphans] [--sign KEYFILE --signer NAME]\n"
+                            "       sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]... [--sign KEYFILE --signer NAME]\n"
                             "       sqcart3 keygen KEYFILE\n"
                             "options: --title T --author A --media-type M --flags rwxm\n"
                             "         --store auto|stored|zstd|chunked --sign KEYFILE --signer NAME --fast"
@@ -101,8 +105,14 @@ int read_commands(std::string_view cmd, const std::vector<std::string_view>& arg
     }
     auto cart = Archive::open(file);
     if (!cart) return fail(cart.error());
-    if (cmd == "unpack" && (args.size() == 3 || (args.size() == 4 && args[3] == "--merge"))) {
-        auto n = unpack(*cart, std::filesystem::path(args[2]), {.merge = args.size() == 4});
+    if (cmd == "unpack" && args.size() >= 3 && args.size() <= 5) {
+        UnpackOptions o;
+        for (std::size_t i = 3; i < args.size(); ++i) {
+            if (args[i] == "--merge") o.merge = true;
+            else if (args[i] == "--executable") o.executable = true;
+            else return usage();
+        }
+        auto n = unpack(*cart, std::filesystem::path(args[2]), o);
         if (!n) return fail(n.error());
         std::println("{}: {} entries unpacked into {}", file.string(), *n, args[2]);
         return 0;
@@ -247,9 +257,11 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
     }
     if (cmd == "pack" && args.size() >= 3) {
         bool drop = false;
+        std::vector<std::string> keep;
         std::vector<std::string_view> rest;
         for (std::size_t i = 3; i < args.size(); ++i) {
             if (args[i] == "--drop-orphans") drop = true;
+            else if (args[i] == "--keep" && i + 1 < args.size()) keep.emplace_back(args[++i]);
             else rest.push_back(args[i]);
         }
         const auto o = parse_options(rest);
@@ -261,7 +273,7 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
         }
         WriteOptions wo;
         if (o->fast) wo.level = 3;
-        auto c = pack(file, std::filesystem::path(args[2]), wo, {.drop_orphans = drop}, std::move(key));
+        auto c = pack(file, std::filesystem::path(args[2]), wo, {.drop_orphans = drop, .keep = std::move(keep)}, std::move(key));
         if (!c) return fail(c.error());
         std::println("{}: packed into {}, {} entries{}", file.string(), args[2], c->live_count, c->signatures_length ? ", signed" : "");
         return 0;
