@@ -885,14 +885,19 @@ private:
 
 struct PackOptions {
     /// Leave out records in SQ-INF/entries.json for files that are not
-    /// there (left by a rename outside the tools), rather than refuse (§6.1).
+    /// there (left by a rename outside the tools), rather than refuse (§6).
     bool drop_orphans = false;
+    /// Top-level folders named with a dot to pack all the same, each by its
+    /// name (".git", for a backup). Every other one is left out (§6). In a
+    /// kept folder, a file the file system marks executable is flagged x.
+    std::vector<std::string> keep;
 };
 
 /// Pack an exploded cartridge, `folder`, into a new cartridge, `out`, as one
-/// commit (§6.1): its regular files, with the metadata SQ-INF/entries.json
+/// commit (§6): its regular files, with the metadata SQ-INF/entries.json
 /// gives them; never a symbolic link (refused, not followed), never the
-/// top-level .squared/ or .git/, never entries.json itself.
+/// top-level folder whose name begins with a dot (.git/, a tool's working
+/// state) unless pack_options.keep names it, never entries.json itself.
 Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::path& out, WriteOptions options = {},
                     PackOptions pack_options = {}, std::optional<SigningKey> key = std::nullopt);
 
@@ -1543,8 +1548,18 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
             metadata.emplace(nfc(path), std::move(*o));
         }
     }
-    // The files.
+    // The kept dot folders: each a name at the top, and there.
+    for (const std::string& k : pack_options.keep) {
+        if (!k.starts_with(".") || k == "." || k == ".." || k.find('/') != std::string::npos)
+            return fail(Code::path, "keep: a top-level folder named with a dot (.git), not " + k);
+        if (!fs::is_directory(fs::symlink_status(folder / k, ec))) return fail(Code::path, "keep: no folder " + k + " at the top");
+    }
+    auto kept = [&](std::string_view name) {
+        return std::ranges::any_of(pack_options.keep, [&](const std::string& k) { return name == k || name.starts_with(k + "/"); });
+    };
+    // The files, and which a kept folder marks executable.
     std::vector<std::pair<std::string, fs::path>> files;
+    std::set<std::string, std::less<>> executable;
     fs::recursive_directory_iterator it(folder, fs::directory_options::none, ec), end;
     if (ec) return fail(Code::io, std::format("cannot read {}: {}", folder.string(), ec.message()));
     for (; it != end; it.increment(ec)) {
@@ -1552,12 +1567,14 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
         const fs::path rel = it->path().lexically_relative(folder);
         std::string name = rel.generic_string();
         // Names as the file system gives them; macOS decomposes them (NFD),
-        // and every path is NFC (§4.1, §6.1).
+        // and every path is NFC (§4.1, §6).
         if (!valid_utf8(name)) return fail(Code::path, "a name that is not UTF-8", name);
         name = nfc(name);
         const auto status = it->symlink_status(ec);
-        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6.1)", name);
-        if (it.depth() == 0 && fs::is_directory(status) && (name == ".squared" || name == ".git")) {
+        if (fs::is_symlink(status)) return fail(Code::path, "a symbolic link: refused, not followed (§6)", name);
+        // A top-level folder named with a dot: a tool's working state
+        // (.git/, and any consumer's), left out unless kept by name (§6).
+        if (it.depth() == 0 && fs::is_directory(status) && name.starts_with(".") && !kept(name)) {
             it.disable_recursion_pending();
             continue;
         }
@@ -1566,13 +1583,14 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
             return fail(Code::path, "two names in the folder that are one in NFC", name);
         }
         files.emplace_back(name, it->path());
+        if (kept(name) && (status.permissions() & fs::perms::owner_exec) != fs::perms::none) executable.insert(name);
     }
     std::ranges::sort(files);
     std::set<std::string, std::less<>> present;
     for (const auto& [name, p] : files) present.insert(name);
     for (const auto& [path, o] : metadata) {
         if (!present.contains(path) && !pack_options.drop_orphans) {
-            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6.1)", path);
+            return fail(Code::malformed, "a record in SQ-INF/entries.json for a file that is not there (an orphan, §6)", path);
         }
     }
     auto w = Writer::create(out, options);
@@ -1583,6 +1601,7 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
         if (!bytes) return fail(Code::io, "cannot read it", name);
         PutOptions o;
         if (auto m = metadata.find(name); m != metadata.end()) o = m->second;
+        else if (executable.contains(name)) o.flags = flag::r | flag::x;
         if (auto r = w->put(name, *bytes, o); !r) return std::unexpected(r.error());
     }
     return w->commit();
