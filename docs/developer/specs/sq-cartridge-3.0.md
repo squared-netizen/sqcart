@@ -2,10 +2,13 @@
 
 **Status: draft, 2026-11-18, revised the same day after a red-team
 review (`sq-cartridge-3.0-red-team.md`, which explains every change and
-its evidence), and with the hash, signature library and chunk size
-decided (Appendix B.1).** Nothing here is implemented. Version 2.0
-(`sq-cartridge-2.0.md`) stays the normative format until this one is
-accepted and sqcart reads and writes it.
+its evidence), with every open question decided (Appendix B).** It is
+implemented by `sq.cart` and `sq.cart.write` (`v3/`), and in use: sqterm's
+packages are 3.0 cartridges, and the Virtual Cartridge Drive (sqdrive)
+works on them. It becomes the SDK's one format when squared's templates,
+kits and packages move to it, once, with squared-pg reading it (§13).
+Version 2.0 (`sq-cartridge-2.0.md`) is not carried forward: nothing reads
+or converts it after that move.
 
 Version 3.0 replaces the container. A cartridge is no longer a ZIP
 archive: it is a single file in a format of its own, built for four
@@ -621,10 +624,14 @@ exploded cartridge of kind `workspace`: its root holds
 
 - The envelope's `provenance` (2.0 §5.5) names the template, kits,
   packages and framework the workspace was made from.
-- `consumers.square` holds what square keeps: the layers, the user
-  working directory, and the per-file provenance table (path, ownership
-  class, origin, hash). Its shape is square's to define, as every
-  section's is its consumer's.
+- `consumers.square` holds what square keeps: the roles (where the app,
+  its layouts and its assets are). Its shape is square's to define, as
+  every section's is its consumer's (square's spec §2.2).
+- The per-file provenance table (path, ownership class, origin, hash) is
+  square's too, in `SQ-INF/files.json` beside the manifest, so the
+  manifest stays small (square's spec §9).
+- The build conventions a template and its kits bring are ordinary
+  entries (`sq/build/*.lua`), which the workspace's `build.lua` includes.
 - Working state that is not part of the workspace's identity (square's
   journal, staging folder and lock) stays out of `SQ-INF/`, in
   `.squared/`, which is never an entry (§6.1). Neither is `.git/`. Build
@@ -1039,19 +1046,21 @@ dictionaries, and, for an exploded cartridge, orphans in
 
 ## 13. From 2.0
 
-- `sqcart convert` reads a 2.0 cartridge (ZIP or exploded) and writes a
-  3.0 one: the same entries, `format_version` 3, created and updated of
-  0, flags `r` (and `x` on Lua source), media types guessed from
-  extensions, `SQ-INF/hashes.json` dropped. A `kind` of `cartridge`
-  becomes `application`.
-- A 3.0 reader MAY read 2.0 ZIP cartridges too, to ease the move, and
-  MUST report them as 2.0. It decides which format a file is by its
-  first bytes alone: the 3.0 magic means 3.0, a ZIP local file header
-  means 2.0. A ZIP is found from its end, so one file can be both a valid
-  3.0 cartridge and a valid ZIP; a reader that tried both could be shown
-  two different cartridges in one file, as Android's Janus flaw
-  (CVE-2017-13156) showed one file that was both an APK and a DEX.
+- **No conversion tool, and no 2.0 reading** (decided 2026-11-20). The
+  SDK's 2.0 cartridges are few and in its own repositories: squared's
+  templates, kits and package, as exploded cartridges. They move once, by
+  a script in squared (`tools/cartridges_to_3.lua`): `format_version` 3, a
+  `kind` of `cartridge` becomes `application`, `SQ-INF/hashes.json`
+  dropped (integrity is the index's, §9), and flags `x` on Lua source in
+  `SQ-INF/entries.json`. Their tree is unchanged.
+- A 3.0 reader reads 3.0 only, and refuses a ZIP as "not a 3.0
+  cartridge". It never decides between formats, so it can never be shown
+  two cartridges in one file (a ZIP is found from its end, so one file
+  can be a valid 3.0 cartridge and a valid ZIP: Android's Janus flaw,
+  CVE-2017-13156, was one file both an APK and a DEX).
 - A 3.0 writer writes 3.0 only.
+- squared-pg reads 3.0 (through `sq.cart`) before the move, and only 3.0
+  after it.
 - squared-pg workspaces move from `.squared/metadata.json` to
   `SQ-INF/manifest.json` once, through square (§6.2).
 - sqterm's packages (`.tar.zst` with an `SQ-INF/manifest.json` inside)
