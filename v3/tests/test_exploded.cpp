@@ -82,6 +82,31 @@ int main() {
     check(s && s->attributes == R"({"name":"Northford","population":41250})", "attributes, canonical");
     check(check(cart).ok(), "check passes");
 
+    // The folder read where it is: the same entries, metadata and bytes as
+    // the packed cartridge.
+    {
+        auto f = Folder::open(src);
+        check(f.has_value(), f ? "a folder opens" : f.error().message);
+        if (f) {
+            check(f->manifest().id == a->manifest().id && f->manifest().kind == a->manifest().kind, "the same manifest");
+            const auto packed = a->entries();
+            bool same = packed && packed->size() == f->entries().size();
+            for (std::size_t i = 0; same && i < packed->size(); ++i) {
+                const Entry &p = (*packed)[i], &e = f->entries()[i];
+                same = p.path == e.path && p.flags == e.flags && p.title == e.title && p.created == e.created &&
+                       p.attributes == e.attributes && p.media_type == e.media_type && p.size == e.size &&
+                       [&] { auto x = a->read(p), y = f->read(e); return x && y && *x == *y; }();
+            }
+            check(same, "the same entries, metadata and bytes as packed");
+            check(!f->find(".git/HEAD") && !f->find("SQ-INF/entries.json") && f->find(".profile"), "the same entries left out");
+        }
+        const fs::path old = root() / "old";
+        write(old / "SQ-INF/manifest.json", R"({"format":"squared-cartridge","format_version":2,"kind":"template","id":"a.b","version":"1.0.0"})");
+        auto o = Folder::open(old);
+        check(!o && o.error().code == Code::unsupported, "a 2.0 folder is refused");
+        check(!Folder::open(root() / "outside"), "a folder with no manifest is refused");
+    }
+
     // --keep .git: a kept dot folder packed, its executable files flagged
     // x; unpacked with executable, a hook runs again; without, it does not.
     {
@@ -137,6 +162,8 @@ int main() {
         fs::create_symlink(root() / "outside/secret", linked / "secret");
         auto r = pack(linked, root() / "linked.sq", quick());
         check(!r && r.error().code == Code::path, "pack refuses a symbolic link (R12)");
+        auto rf = Folder::open(linked);
+        check(!rf && rf.error().code == Code::path, "and so does the folder reader");
 
         const fs::path trap = root() / "trap";
         fs::create_directories(trap);

@@ -1479,45 +1479,16 @@ std::optional<std::vector<std::byte>> read_file(const std::filesystem::path& p) 
 
 /// One record of SQ-INF/entries.json as PutOptions.
 Result<PutOptions> exploded_options(const data::JsonValue& v, const std::string& path) {
+    auto e = exploded_record(v, path);
+    if (!e) return std::unexpected(e.error());
     PutOptions o;
-    if (v.object_if() == nullptr) return fail(Code::json, "its SQ-INF/entries.json record is not an object", path);
-    for (const auto& [name, value] : *v.object_if()) {
-        const std::string* s = value.string_if();
-        const auto number = [&]() -> std::optional<std::int64_t> {
-            if (const auto* i = value.signed_integer_if()) return *i;
-            if (const auto* u = value.unsigned_integer_if()) return static_cast<std::int64_t>(*u);
-            return std::nullopt;
-        };
-        if (name == "title" && s) {
-            o.title = *s;
-        } else if (name == "author" && s) {
-            o.author = *s;
-        } else if (name == "media_type" && s) {
-            o.media_type = *s;
-        } else if (name == "created" && number()) {
-            o.created = *number();
-        } else if (name == "updated" && number()) {
-            o.updated = *number();
-        } else if (name == "attributes" && value.object_if()) {
-            auto text = data::write_json(value, {.canonical = true});
-            if (!text) return fail(Code::json, text.error.message, path);
-            o.attributes = std::move(text.text);
-        } else if (name == "flags" && s) {
-            o.flags = 0;
-            for (const char c : *s) {
-                switch (c) {
-                    case 'r': o.flags |= flag::r; break;
-                    case 'w': o.flags |= flag::w; break;
-                    case 'x': o.flags |= flag::x; break;
-                    case 'm': o.flags |= flag::mappable; break;
-                    case 'd': o.flags |= flag::dictionary; break;
-                    default: return fail(Code::json, std::format("the flag '{}' in SQ-INF/entries.json", c), path);
-                }
-            }
-        } else {
-            return fail(Code::json, std::format("SQ-INF/entries.json: \"{}\" is not a member, or not of its type", name), path);
-        }
-    }
+    o.title = std::move(e->title);
+    o.author = std::move(e->author);
+    o.media_type = std::move(e->media_type);
+    o.attributes = std::move(e->attributes);
+    o.created = e->created;
+    o.updated = e->updated;
+    o.flags = e->flags;
     if (o.flags & flag::mappable) o.store = Store::stored;
     return o;
 }
