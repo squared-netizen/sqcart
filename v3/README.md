@@ -98,6 +98,12 @@ and `pack` to write
 read commands linked against the reading archives alone: it holds no zstd
 compressor.
 
+`pack` and `unpack` hold no file whole: `pack` puts each file with
+`put_file` (read at the commit, 1 MiB at a time, chunked past 64 MiB), and
+`unpack` writes a chunked entry a verified chunk at a time, into `NAME.part`
+renamed to `NAME` once every chunk passed; an entry that is not chunked (64
+MiB at most) is read and verified whole first, as before.
+
 | Archive | Holds | Link for |
 |---|---|---|
 | `libsqcart.a` | sq.cart, sq.data, yyjson, Monocypher | both |

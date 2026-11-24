@@ -1568,12 +1568,12 @@ Result<Commit> pack(const std::filesystem::path& folder, const std::filesystem::
     if (!w) return std::unexpected(w.error());
     if (key) w->sign_with(std::move(*key));
     for (const auto& [name, p] : files) {
-        auto bytes = read_file(p);
-        if (!bytes) return fail(Code::io, "cannot read it", name);
         PutOptions o;
         if (auto m = metadata.find(name); m != metadata.end()) o = m->second;
         else if (executable.contains(name)) o.flags = flag::r | flag::x;
-        if (auto r = w->put(name, *bytes, o); !r) return std::unexpected(r.error());
+        // Read at the commit, 1 MiB at a time: a file is never held whole
+        // (chunked past 64 MiB), so a large asset packs on a phone too.
+        if (auto r = w->put_file(name, p, o); !r) return std::unexpected(r.error());
     }
     return w->commit();
 }
