@@ -136,6 +136,27 @@ int main() {
         }
     }
 
+    // leave_out: a folder and a file left out, a link under one not looked
+    // at; a path outside the folder, or in SQ-INF, refused.
+    {
+        const fs::path w = root() / "workspace";
+        write(w / "SQ-INF/manifest.json", text(manifest()));
+        write(w / "src/main.cpp", "int main() {}\n");
+        write(w / "build/app.o", "object code");
+        write(w / "notes/scratch.txt", "mine, not shared");
+        write(w / "notes/keep.txt", "shared");
+        fs::create_directory_symlink(w / "src", w / "build/link");
+        const fs::path wc = root() / "workspace.sq";
+        auto packed = pack(w, wc, quick(), {.leave_out = {"build", "notes/scratch.txt"}});
+        check(packed.has_value(), packed ? "pack with leave_out" : packed.error().message);
+        auto wa = Archive::open(wc);
+        check(wa && wa->find("src/main.cpp") && wa->find("notes/keep.txt") && !wa->find("build/app.o") &&
+                  !wa->find("notes/scratch.txt"),
+              "build/ and notes/scratch.txt left out, the rest packed; the link under build/ not refused");
+        check(!pack(w, root() / "bad.sq", quick(), {.leave_out = {"../x"}}).has_value(), "leave_out refuses ..");
+        check(!pack(w, root() / "bad.sq", quick(), {.leave_out = {"SQ-INF"}}).has_value(), "leave_out refuses SQ-INF");
+    }
+
     // A file past 64 MiB: packed chunked from the file (never read whole),
     // unpacked a verified chunk at a time, through NAME.part, the same bytes.
     {

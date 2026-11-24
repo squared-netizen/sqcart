@@ -16,7 +16,7 @@
 //   sqcart3 mv FILE FROM TO            an entry renamed, its content not copied (§3.6), committed
 //   sqcart3 truncate FILE PATH SIZE    an entry cut or grown with zeros, committed
 //   sqcart3 compact FILE               one commit, its live entries only (§10.4)
-//   sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]...
+//   sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]... [--leave-out PATH]...
 //                                      an exploded cartridge packed, as one commit; a top-level
 //                                      dot folder (.git) only when kept by name
 //   sqcart3 keygen KEYFILE             an Ed25519 signing key (a 32-byte seed, in hex, mode 0600)
@@ -50,7 +50,7 @@ int usage() {
                             "       sqcart3 mv FILE FROM TO [options]\n"
                             "       sqcart3 truncate FILE PATH SIZE [options]\n"
                             "       sqcart3 compact FILE\n"
-                            "       sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]... [--sign KEYFILE --signer NAME]\n"
+                            "       sqcart3 pack DIR FILE [--drop-orphans] [--keep .NAME]... [--leave-out PATH]... [--sign KEYFILE --signer NAME]\n"
                             "       sqcart3 keygen KEYFILE\n"
                             "options: --title T --author A --media-type M --flags rwxm\n"
                             "         --store auto|stored|zstd|chunked --sign KEYFILE --signer NAME --fast"
@@ -257,11 +257,12 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
     }
     if (cmd == "pack" && args.size() >= 3) {
         bool drop = false;
-        std::vector<std::string> keep;
+        std::vector<std::string> keep, leave_out;
         std::vector<std::string_view> rest;
         for (std::size_t i = 3; i < args.size(); ++i) {
             if (args[i] == "--drop-orphans") drop = true;
             else if (args[i] == "--keep" && i + 1 < args.size()) keep.emplace_back(args[++i]);
+            else if (args[i] == "--leave-out" && i + 1 < args.size()) leave_out.emplace_back(args[++i]);
             else rest.push_back(args[i]);
         }
         const auto o = parse_options(rest);
@@ -273,7 +274,7 @@ int write_commands(std::string_view cmd, const std::vector<std::string_view>& ar
         }
         WriteOptions wo;
         if (o->fast) wo.level = 3;
-        auto c = pack(file, std::filesystem::path(args[2]), wo, {.drop_orphans = drop, .keep = std::move(keep)}, std::move(key));
+        auto c = pack(file, std::filesystem::path(args[2]), wo, {.drop_orphans = drop, .keep = std::move(keep), .leave_out = std::move(leave_out)}, std::move(key));
         if (!c) return fail(c.error());
         std::println("{}: packed into {}, {} entries{}", file.string(), args[2], c->live_count, c->signatures_length ? ", signed" : "");
         return 0;
