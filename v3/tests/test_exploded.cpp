@@ -136,6 +136,37 @@ int main() {
         }
     }
 
+    // A file past 64 MiB: packed chunked from the file (never read whole),
+    // unpacked a verified chunk at a time, through NAME.part, the same bytes.
+    {
+        const fs::path big = root() / "big";
+        write(big / "SQ-INF/manifest.json", text(manifest()));
+        const std::uint64_t size = (std::uint64_t{64} << 20) + 3;
+        {
+            fs::create_directories(big / "assets");
+            std::ofstream out(big / "assets/world.bin", std::ios::binary);
+            std::vector<char> block(1 << 20);
+            for (std::uint64_t at = 0; at < size; at += block.size()) {
+                for (std::size_t i = 0; i < block.size(); ++i) block[i] = static_cast<char>((at + i) * 2654435761u >> 24);
+                out.write(block.data(), static_cast<std::streamsize>(std::min<std::uint64_t>(block.size(), size - at)));
+            }
+        }
+        const fs::path bc = root() / "big.sq";
+        auto packed = pack(big, bc, quick());
+        check(packed.has_value(), packed ? "pack a file past 64 MiB" : packed.error().message);
+        auto ba = Archive::open(bc);
+        const auto e = ba ? std::optional<Entry>(ba->find("assets/world.bin").value_or(Entry{})) : std::nullopt;
+        check(e && e->codec == Codec::chunked && e->size == size, "stored chunked");
+        if (ba) {
+            const fs::path again = root() / "big-unpacked";
+            auto u = unpack(*ba, again);
+            check(u.has_value(), u ? "unpack it" : u.error().message);
+            check(fs::file_size(again / "assets/world.bin") == size && read(again / "assets/world.bin") == read(big / "assets/world.bin"),
+                  "the same bytes, unpacked a chunk at a time");
+            check(!fs::exists(again / "assets/world.bin.part"), "no .part left");
+        }
+    }
+
     // Unpack, and pack again: the same folder, the same digest.
     const fs::path out = root() / "unpacked";
     auto n = unpack(*a, out);
