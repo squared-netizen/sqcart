@@ -13,7 +13,7 @@ squared-pg package). Every squared tool and app uses it: sqpg, square,
 sqdrive, pkg, sqterm and sqIDE vendor `v3/` and nothing else.
 
 ```sh
-make -C v3 test
+sqmake -C v3 test
 ```
 
 ## sqcart 2: deprecated
