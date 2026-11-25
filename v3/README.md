@@ -59,8 +59,8 @@ done.
 ## Building
 
 ```sh
-make test                          # the library, sqcart3 and the tests, then run them
-make CXX=/usr/lib/llvm-23/bin/clang++ test
+sqmake test                        # the library, sqcart3 and the tests, then run them (build.lua)
+CXX=/usr/lib/llvm-23/bin/clang++ sqmake test
 ```
 
 Needs clang and libc++ with `import std;`: 23 is what sqterm's packages and
@@ -94,7 +94,7 @@ Offline: everything else is in `../third_party`:
 `sqcart3` is both on the command line: `check`, `ls`, `cat`, `info` and
 `unpack` to read; `new`, `put`, `rm`, `mv`, `truncate`, `compact`, `keygen`
 and `pack` to write
-(`--sign KEYFILE` signs a commit). `make` also builds `sqcart3-read`, the
+(`--sign KEYFILE` signs a commit). `sqmake` also builds `sqcart3-read`, the
 read commands linked against the reading archives alone: it holds no zstd
 compressor.
 
