@@ -11,7 +11,9 @@ CC       ?= gcc
 CXXSTD   ?= c++20
 OPT      ?= -O1 -g
 WARN     := -Wall -Wextra -Wpedantic
-DEFS     := -DSQCART_ENABLE_WRITER=1 -DSQCART_TEST_SOURCE_DIR=\"$(CURDIR)\"
+# sqcart 2 is deprecated (README.md); its own build says so, so its header
+# stays quiet here and warns everywhere else.
+DEFS     := -DSQCART_V2_OWN_BUILD=1 -DSQCART_ENABLE_WRITER=1 -DSQCART_TEST_SOURCE_DIR=\"$(CURDIR)\"
 
 INC      := -Iinclude -Isrc -isystem third_party/miniz-3.1.2 \
             -isystem third_party/yyjson-0.12.0/src -isystem third_party/crypto-algorithms
