@@ -4,6 +4,30 @@ My Vision for sqcart
 
 Squared .sq cartridges will act as high-capacity, high-performance data containers that can support both enormous datasets and executable extensions.
 
+## sqcart 3: the current format
+
+**[`v3/`](v3/README.md) is sqcart**: the [Squared Cartridge Specification
+3.0](docs/developer/specs/sq-cartridge-3.0.md) as C++23 modules (`sq.cart`,
+`sq.cart.write`), and its tool, `sqcart3` (installed as `sqcart` by the
+squared-pg package). Every squared tool and app uses it: sqpg, square,
+sqdrive, pkg, sqterm and sqIDE vendor `v3/` and nothing else.
+
+```sh
+make -C v3 test
+```
+
+## sqcart 2: deprecated
+
+> [!WARNING]
+> **sqcart 2 is deprecated.** Everything else at this top level
+> (`include/`, `src/`, `app/`, `tests/`, `CMakeLists.txt`, `Makefile`) is the
+> 2.0 library and its CLI. No squared tool or app uses it, and none may
+> start to: it is not built by CI, gets no new work, and will be removed.
+> `<sqcart/sqcart.hpp>` warns when it is included outside its own build, and
+> CMake warns when it is added to another project. Cartridges written in
+> format 2 are converted with squared's `tools/cartridges_to_3.lua`.
+
+What follows describes sqcart 2, for whoever still has to read it.
 
 Reference implementation of the [Squared Cartridge Specification
 2.0](docs/developer/specs/sq-cartridge-2.0.md) — the `.sq` container format
@@ -12,7 +36,7 @@ distributable applications.
 
 Standalone C++20. No dependency on `squared-pg` or on the Squared framework.
 
-## Build
+### Build
 
 ```sh
 cmake -S . -B build -DSQCART_BUILD_TESTS=ON
@@ -35,7 +59,7 @@ add_subdirectory(sqcart)
 target_link_libraries(my_target PRIVATE sqcart::read)
 ```
 
-## Targets
+### Targets
 
 | Target | Option | Default | For |
 |---|---|---|---|
@@ -47,7 +71,7 @@ target_link_libraries(my_target PRIVATE sqcart::read)
 A game runtime or Android launcher links `sqcart::read` alone and carries no
 compressor, no canonical-ordering logic and no manifest serialiser.
 
-## Library
+### Library
 
 ```cpp
 #include <sqcart/sqcart.hpp>
@@ -78,7 +102,7 @@ acquiring the other's vocabulary (spec §0.1, §5.6).
 both accepted; `open()` detects which, and the two are semantically equivalent
 (spec §3.5) down to producing the same content digest.
 
-## CLI
+### CLI
 
 ```
 reading:
@@ -109,14 +133,14 @@ $ sqcart pack resources/kits/sdl3 -o kit.sdl3.sq
 The digest is computed over content and paths, never over archive bytes, so
 it is stable across compressors and across container forms.
 
-## C++20 and `std::expected`
+### C++20 and `std::expected`
 
 `<expected>` is C++23. `include/sqcart/expected.hpp` aliases `std::expected`
 where available and supplies a minimal substitute otherwise. Code using
 `sqcart::Result<T>` compiles either way; `tests/test_expected.cpp` asserts the
 two paths behave identically.
 
-## Constraints
+### Constraints
 
 See `AGENTS.md` for the scope rule, the CLI's IO-isolation rule, and the
 single-digest-implementation rule. Run `../tools/sqcart-isolation.fish` before

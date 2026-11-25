@@ -2,6 +2,9 @@
 //
 // sqcart — reference implementation of the Squared Cartridge Specification 1.0
 //
+// DEPRECATED: sqcart 2. sqcart 3 (v3/: `import sq.cart;`) is sqcart, and no
+// squared tool or app may use this library; it will be removed (README.md).
+//
 // This header is the complete public surface of the library. Nothing else is
 // supported for inclusion by consumers. No backend type (miniz, yyjson)
 // appears here or in any header reachable from here; see the component
@@ -16,6 +19,10 @@
 
 #ifndef SQCART_SQCART_HPP
 #define SQCART_SQCART_HPP
+
+#ifndef SQCART_V2_OWN_BUILD
+#warning "sqcart 2 is deprecated and will be removed: use sqcart 3 (v3/, import sq.cart)"
+#endif
 
 #include "sqcart/expected.hpp"
 

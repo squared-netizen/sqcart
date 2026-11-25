@@ -12,6 +12,13 @@ project(sqcart
     DESCRIPTION "Reference implementation of the Squared Cartridge Specification 1.0"
     LANGUAGES   C CXX)
 
+# sqcart 2 is deprecated: v3/ (sq.cart, C++23 modules) is sqcart, and no
+# squared tool or app may use this library (README.md).
+if(NOT PROJECT_IS_TOP_LEVEL)
+    message(DEPRECATION "sqcart 2 is deprecated and will be removed: use sqcart 3 (v3/, import sq.cart)")
+endif()
+add_compile_definitions(SQCART_V2_OWN_BUILD=1)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
