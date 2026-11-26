@@ -15,6 +15,10 @@
 --   root   where this folder is, from the including build file (default ".")
 --   data   a library that provides sq.data (squared's own); without it the
 --          vendored copy (../third_party/squared-data) is built, with yyjson
+--   zstd   a library that provides zstd 1.5, all of it, with zstd.h in its
+--          public flags (squared's own: squared.zstd); without it the
+--          vendored copy (../third_party/zstd-1.5.7) is built: its decoder
+--          alone for a reader. Given, one copy is linked, whoever else uses it
 --
 -- The compiler is $CXX (and $CC): clang and libc++ 19 or later (23 is what
 -- sqterm and CI use) with `import std;`. Offline: zstd, yyjson, Monocypher
@@ -36,9 +40,11 @@ end
 
 local warn = {"-Wall", "-Wextra", "-Wpedantic", "-Wconversion", "-Wno-sign-conversion",
               "-Wno-missing-designated-field-initializers"}
+-- zstd's header: the given library's (its public flags), or the vendored one.
+local zstd_header = s.zstd and {} or {"-isystem", tp .. "/zstd-1.5.7"}
 local c_includes = {"-I" .. tp .. "/yyjson-0.12.0/src", "-I" .. tp .. "/zstd-1.5.7",
                     "-I" .. tp .. "/monocypher-4.0.3", "-I" .. tp .. "/monocypher-4.0.3/optional"}
-local systems = {"-isystem", tp .. "/yyjson-0.12.0/src", "-isystem", tp .. "/zstd-1.5.7",
+local systems = {"-isystem", tp .. "/yyjson-0.12.0/src", zstd_header,
                  "-isystem", tp .. "/monocypher-4.0.3", "-isystem", tp .. "/monocypher-4.0.3/optional"}
 
 -- sq.data: the including project's, or the vendored one with yyjson.
@@ -62,15 +68,19 @@ local cart_srcs = {}
 for _, f in ipairs(glob(here("src/*.cppm"))) do
   if not f:match("/write%.cppm$") then cart_srcs[#cart_srcs + 1] = f end
 end
-local cart = library{name = "sqcart", srcs = cart_srcs, deps = {data, monocypher},
+local cart = library{name = "sqcart", srcs = cart_srcs, deps = {data, monocypher, s.zstd},
                      flags = {warn, systems, "-I" .. here("src")}}
 
--- zstd twice: its decoder alone for a reader, all of it for a writer. Link one.
-local unzstd = library{name = "sqcart-unzstd", srcs = {tp .. "/zstd-1.5.7/zstddeclib.c"},
-                       flags = {"-w", c_includes}}
-local zstd = library{name = "sqcart-zstd", srcs = {tp .. "/zstd-1.5.7/zstd.c"},
-                     flags = {"-w", c_includes, "-DZSTD_MULTITHREAD=0"}}
-local writer = library{name = "sqcart-write", srcs = {here("src/write.cppm")}, deps = {cart},
+-- zstd: the given library, or the vendored one twice: its decoder alone for
+-- a reader, all of it for a writer. Link one.
+local unzstd, zstd = s.zstd, s.zstd
+if not s.zstd then
+  unzstd = library{name = "sqcart-unzstd", srcs = {tp .. "/zstd-1.5.7/zstddeclib.c"},
+                   flags = {"-w", c_includes}}
+  zstd = library{name = "sqcart-zstd", srcs = {tp .. "/zstd-1.5.7/zstd.c"},
+                 flags = {"-w", c_includes, "-DZSTD_MULTITHREAD=0"}}
+end
+local writer = library{name = "sqcart-write", srcs = {here("src/write.cppm")}, deps = {cart, s.zstd},
                        flags = {warn, systems, "-I" .. here("src")}}
 
 local libs = {
