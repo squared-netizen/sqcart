@@ -19,6 +19,9 @@
 --          public flags (squared's own: squared.zstd); without it the
 --          vendored copy (../third_party/zstd-1.5.7) is built: its decoder
 --          alone for a reader. Given, one copy is linked, whoever else uses it
+--   flags  what every library here is compiled with besides its own: the
+--          including project's optimisation and code generation (-O2,
+--          -fPIC for a shared library, ...); built on its own, -O2 -g
 --
 -- The compiler is $CXX (and $CC): clang and libc++ 19 or later (23 is what
 -- sqterm and CI use) with `import std;`. Offline: zstd, yyjson, Monocypher
@@ -38,7 +41,9 @@ if top then
   toolchain.ldflags = {"-stdlib=libc++", "-lpthread"}
 end
 
-local warn = {"-Wall", "-Wextra", "-Wpedantic", "-Wconversion", "-Wno-sign-conversion",
+-- The including project's flags, on every library (C and C++).
+local extra = s.flags or {}
+local warn = {extra, "-Wall", "-Wextra", "-Wpedantic", "-Wconversion", "-Wno-sign-conversion",
               "-Wno-missing-designated-field-initializers"}
 -- zstd's header: the given library's (its public flags), or the vendored one.
 local zstd_header = s.zstd and {} or {"-isystem", tp .. "/zstd-1.5.7"}
@@ -54,11 +59,11 @@ if not data then
   local srcs = {tp .. "/yyjson-0.12.0/src/yyjson.c"}
   for _, f in ipairs(glob(sqd .. "/**/*.cppm")) do srcs[#srcs + 1] = f end
   for _, f in ipairs(glob(sqd .. "/src/*.cpp")) do srcs[#srcs + 1] = f end
-  data = library{name = "sqcart_sqdata", srcs = srcs, flags = {"-w", systems}}
+  data = library{name = "sqcart_sqdata", srcs = srcs, flags = {extra, "-w", systems}}
 end
 
 -- Monocypher (Ed25519 signatures): C, its own warnings left to it.
-local monocypher = library{name = "sqcart_monocypher", flags = {"-w", c_includes},
+local monocypher = library{name = "sqcart_monocypher", flags = {extra, "-w", c_includes},
                            srcs = {tp .. "/monocypher-4.0.3/monocypher.c",
                                    tp .. "/monocypher-4.0.3/optional/monocypher-ed25519.c"}}
 
@@ -76,9 +81,9 @@ local cart = library{name = "sqcart", srcs = cart_srcs, deps = {data, monocypher
 local unzstd, zstd = s.zstd, s.zstd
 if not s.zstd then
   unzstd = library{name = "sqcart-unzstd", srcs = {tp .. "/zstd-1.5.7/zstddeclib.c"},
-                   flags = {"-w", c_includes}}
+                   flags = {extra, "-w", c_includes}}
   zstd = library{name = "sqcart-zstd", srcs = {tp .. "/zstd-1.5.7/zstd.c"},
-                 flags = {"-w", c_includes, "-DZSTD_MULTITHREAD=0"}}
+                 flags = {extra, "-w", c_includes, "-DZSTD_MULTITHREAD=0"}}
 end
 local writer = library{name = "sqcart-write", srcs = {here("src/write.cppm")}, deps = {cart, s.zstd},
                        flags = {warn, systems, "-I" .. here("src")}}
